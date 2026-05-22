@@ -214,14 +214,16 @@ providers:
     base_url: "wss://api.x.ai/v1/realtime"
     model: "grok-voice-latest"  # or grok-voice-think-fast-1.0 (flagship)
     voice: "eve"  # named: eve|ara|rex|sal|leo, or a custom cloned voice ID
-    # μ-law direct passthrough (no resampling) — matches Asterisk's native telephony format.
-    # Switch provider_input_encoding to "linear16" and rate to 24000 for wideband audio.
+    # Input: μ-law @ 8 kHz passthrough (no resample) — matches Asterisk's native telephony.
+    # Output: PCM16 @ 24 kHz — xAI emits 24 kHz PCM16 regardless of what we declare in
+    # session.update (no session.updated ACK arrives). Declaring it correctly here means
+    # the resampler downsamples 24 kHz → 8 kHz for AudioSocket egress (no garble).
     input_encoding: "ulaw"
     input_sample_rate_hz: 8000
     provider_input_encoding: "ulaw"
     provider_input_sample_rate_hz: 8000
-    output_encoding: "ulaw"
-    output_sample_rate_hz: 8000
+    output_encoding: "linear16"
+    output_sample_rate_hz: 24000
     target_encoding: "ulaw"
     target_sample_rate_hz: 8000
     session_warn_after_seconds: 1680  # 28 min — warn before 30-min hard cap

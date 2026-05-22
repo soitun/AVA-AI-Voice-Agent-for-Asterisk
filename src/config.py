@@ -691,13 +691,19 @@ class GrokProviderConfig(BaseModel):
     voice: str = Field(default="eve")  # named: eve|ara|rex|sal|leo, or a custom voice ID
     instructions: Optional[str] = None
     greeting: Optional[str] = None
-    # Audio: μ-law direct passthrough by default (matches Asterisk telephony native)
+    # Audio defaults:
+    # - Input: μ-law @ 8 kHz passthrough (Asterisk-native — confirmed working).
+    # - Output: PCM16 @ 24 kHz. xAI ignores the per-session output_format declaration
+    #   and emits 24 kHz PCM16 regardless (no session.updated ACK arrives to negotiate
+    #   otherwise — observed on live calls 2026-05-22). Declaring the truth here means
+    #   the resampler correctly downsamples 24 kHz → 8 kHz for AudioSocket instead of
+    #   playing 24 kHz content at 8 kHz (which sounds garbled / chipmunk-slow).
     input_encoding: str = Field(default="ulaw")
     input_sample_rate_hz: int = Field(default=8000)
     provider_input_encoding: str = Field(default="ulaw")  # "ulaw" or "linear16" (fallback)
     provider_input_sample_rate_hz: int = Field(default=8000)
-    output_encoding: str = Field(default="ulaw")
-    output_sample_rate_hz: int = Field(default=8000)
+    output_encoding: str = Field(default="linear16")  # xAI emits PCM16 in practice
+    output_sample_rate_hz: int = Field(default=24000)  # xAI's actual native output rate
     target_encoding: str = Field(default="ulaw")  # AudioSocket egress format
     target_sample_rate_hz: int = Field(default=8000)
     input_gain_target_rms: int = Field(default=0)
