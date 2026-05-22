@@ -545,20 +545,37 @@ class GrokProvider(AIProviderInterface):
                     pass
 
             # CRITICAL: Use engine-provided encoding/sample_rate if available
-            # This avoids double conversion and respects the engine's format negotiation
+            # This avoids double conversion and respects the engine's format negotiation.
+            #
+            # Grok accepts audio/pcm (linear16) AND audio/pcmu (8 kHz mu-law) AND audio/pcma
+            # natively in session.update — so when the engine hands us mu-law (telephony
+            # passthrough configuration), forward bytes as-is. The session.update we sent
+            # already declared the right input format to xAI; converting here would break
+            # alignment with what xAI is decoding.
+            provider_enc = (getattr(self.config, "provider_input_encoding", "") or "").lower().strip()
             if encoding and sample_rate:
-                # Engine already converted to correct format via _encode_for_provider
-                # Trust the engine's conversion
-                if encoding.lower().strip() in ("linear16", "pcm16", "slin16"):
+                enc_norm = encoding.lower().strip()
+                if enc_norm in ("linear16", "pcm16", "slin16", "slin"):
+                    # PCM16: pass through (xAI configured for audio/pcm)
+                    pcm16 = audio_chunk
+                    provider_rate = sample_rate
+                elif enc_norm in ("ulaw", "mulaw", "pcmu", "g711_ulaw") and provider_enc in ("ulaw", "mulaw", "pcmu"):
+                    # mu-law passthrough: bytes match what session.update declared (audio/pcmu).
+                    # The variable is still named pcm16 for downstream symmetry but holds raw mu-law.
+                    pcm16 = audio_chunk
+                    provider_rate = sample_rate
+                elif enc_norm in ("alaw", "pcma", "g711_alaw") and provider_enc in ("alaw", "pcma"):
+                    # A-law passthrough: bytes match session.update audio/pcma declaration.
                     pcm16 = audio_chunk
                     provider_rate = sample_rate
                 else:
-                    # Unexpected format - fall back to conversion
+                    # Genuine mismatch (engine format != provider format) — convert.
                     logger.warning(
-                        "Grok: unexpected encoding from engine, converting",
+                        "Grok: engine/provider encoding mismatch, converting",
                         call_id=self._call_id,
-                        encoding=encoding,
-                        sample_rate=sample_rate
+                        engine_encoding=encoding,
+                        engine_sample_rate=sample_rate,
+                        provider_encoding=provider_enc,
                     )
                     pcm16 = self._convert_inbound_audio(audio_chunk)
                     provider_rate = int(getattr(self.config, "provider_input_sample_rate_hz", 0) or 24000)
