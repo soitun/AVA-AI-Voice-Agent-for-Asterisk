@@ -82,6 +82,7 @@ def _ai_engine_env_key(key: str) -> bool:
             "RESEND_API_KEY",
             "ELEVENLABS_API_KEY",
             "ELEVENLABS_AGENT_ID",
+            "XAI_API_KEY",  # xAI Grok Voice Agent (legacy single-instance fallback)
             "TZ",
             "STREAMING_LOG_LEVEL",
         )
@@ -2226,6 +2227,8 @@ async def verify_provider_credentials(provider_key: str):
             if kind == "google_live"
             else ("ELEVENLABS_API_KEY",)
             if kind == "elevenlabs_agent"
+            else ("XAI_API_KEY",)
+            if kind == "grok"
             else ()
         ),
     )
@@ -2287,6 +2290,15 @@ async def verify_provider_credentials(provider_key: str):
             if resp.status_code >= 400:
                 raise HTTPException(status_code=400, detail="ElevenLabs API key verification failed")
             return {"status": "success", "message": "ElevenLabs credentials verified"}
+        if kind == "grok":
+            if not api_key:
+                raise HTTPException(status_code=400, detail="xAI API key is not configured")
+            # xAI exposes an OpenAI-compatible /v1/models endpoint for credential check.
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get("https://api.x.ai/v1/models", headers={"Authorization": f"Bearer {api_key}"})
+            if resp.status_code >= 400:
+                raise HTTPException(status_code=400, detail="xAI API key verification failed")
+            return {"status": "success", "message": "xAI API key verified"}
     except HTTPException:
         raise
     except Exception as exc:

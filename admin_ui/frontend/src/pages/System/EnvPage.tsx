@@ -398,7 +398,7 @@ const EnvPage = () => {
         'AUDIOSOCKET_ADVERTISE_HOST', 'EXTERNAL_MEDIA_ADVERTISE_HOST',
         // AI Engine - API Keys
         'OPENAI_API_KEY', 'GROQ_API_KEY', 'DEEPGRAM_API_KEY', 'GOOGLE_API_KEY', 'TELNYX_API_KEY', 'RESEND_API_KEY',
-        'ELEVENLABS_API_KEY', 'ELEVENLABS_AGENT_ID', 'GOOGLE_APPLICATION_CREDENTIALS',
+        'ELEVENLABS_API_KEY', 'ELEVENLABS_AGENT_ID', 'XAI_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS',
         'GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION',
         // Email (SMTP)
         'SMTP_HOST', 'SMTP_PORT', 'SMTP_USERNAME', 'SMTP_PASSWORD', 'SMTP_TLS_MODE', 'SMTP_TLS_VERIFY',
@@ -712,6 +712,7 @@ const EnvPage = () => {
                             placeholder="agent_..."
                             tooltip="Required for ElevenLabs Conversational AI mode."
                         />
+                        {renderSecretInput('xAI API Key', 'XAI_API_KEY', 'xai-...')}
                         {renderSecretInput('Resend API Key', 'RESEND_API_KEY', 're_...')}
                         <FormInput
                             label="Google Service Account"
