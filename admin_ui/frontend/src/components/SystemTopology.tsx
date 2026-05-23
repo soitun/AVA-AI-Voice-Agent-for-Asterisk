@@ -96,17 +96,55 @@ export const SystemTopology = () => {
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
-  // Fetch health status.
+  // Fetch health status with three-state + two-strike debounce per indicator.
   //
-  // Why two-strike debounce: a single transient network blip (server SSH
-  // refusing for 30s, a docker compose recreate of admin_ui, etc.) shouldn't
-  // flip the dashboard to red. We require two consecutive failed/disconnected
-  // reads before reporting "disconnected" — a single success in between resets
-  // the counter. The first read after mount is allowed to set the state
-  // directly so the initial "Checking…" pill becomes a definite state ASAP.
+  // Three states: `unknown` (haven't reached a confirmed answer) → grey
+  // "Checking…", `connected/true` → green, `error/false` → red. The unknown
+  // state is sticky: a SINGLE negative read keeps the state at unknown
+  // (still grey). Only the SECOND consecutive negative read flips to red.
+  //
+  // Why: after a docker compose recreate, the AI engine warms up over ~5–10s
+  // (Asterisk reconnecting ARI, model loaders coming online). During that
+  // window the backend legitimately reports `ari_connected=false`,
+  // `local_ai_server.status=error`, etc. — but the user sees that as red
+  // alarm spam that flips green on its own. By holding at "Checking…" for
+  // one polling cycle, the dashboard only goes red when the issue persists
+  // beyond a normal warmup. Genuinely broken systems take ~10s (2 polls) to
+  // show red, which is the right trade.
+  //
+  // Any positive read clears the streak counter and immediately shows green.
   useEffect(() => {
     let ariFailStreak = 0;
+    let aiEngineFailStreak = 0;
+    let localAIFailStreak = 0;
     let mounted = true;
+
+    // Map a raw boolean/error reading + the current state to a new value.
+    // `prev` is the existing state ('unknown' | 'connected' | 'error'). On a
+    // success read we go straight to connected. On a failure we hold at
+    // unknown for the first miss, then flip to error on the second.
+    const debouncedTri = (
+      success: boolean,
+      streak: number,
+      prev: 'unknown' | 'connected' | 'error',
+    ): 'unknown' | 'connected' | 'error' => {
+      if (success) return 'connected';
+      if (streak >= 2) return 'error';
+      // Hold whatever the previous confirmed state was. If we were previously
+      // 'connected', stay connected through one bad read (transient blip).
+      // If we were 'unknown', stay unknown (still warming up).
+      return prev === 'connected' ? 'connected' : 'unknown';
+    };
+    const debouncedBool = (
+      success: boolean,
+      streak: number,
+      prev: boolean | null,
+    ): boolean | null => {
+      if (success) return true;
+      if (streak >= 2) return false;
+      return prev === true ? true : null;
+    };
+
     const fetchHealth = async () => {
       try {
         const res = await axios.get('/api/system/health');
@@ -115,42 +153,35 @@ export const SystemTopology = () => {
         const ariReported: boolean = Boolean(
           aiEngineDetails.ari_connected ?? aiEngineDetails.asterisk?.connected ?? false,
         );
-        if (ariReported) {
-          ariFailStreak = 0;
-        } else {
-          ariFailStreak += 1;
-        }
+        const aiEngineConnected: boolean = res.data.ai_engine?.status === 'connected';
+        const localAIConnected: boolean = res.data.local_ai_server?.status === 'connected';
+
+        ariFailStreak = ariReported ? 0 : ariFailStreak + 1;
+        aiEngineFailStreak = aiEngineConnected ? 0 : aiEngineFailStreak + 1;
+        localAIFailStreak = localAIConnected ? 0 : localAIFailStreak + 1;
+
         setState(prev => ({
           ...prev,
-          aiEngineStatus: res.data.ai_engine?.status === 'connected' ? 'connected' : 'error',
-          // Debounce: stay on the previous value after a single negative read,
-          // unless we haven't reported a state yet (prev.ariConnected === null)
-          // in which case go ahead and surface the reported value so the
-          // initial "Checking…" indicator resolves promptly.
-          ariConnected:
-            ariReported
-              ? true
-              : prev.ariConnected === null || ariFailStreak >= 2
-                ? false
-                : prev.ariConnected,
+          aiEngineStatus: debouncedTri(aiEngineConnected, aiEngineFailStreak, prev.aiEngineStatus),
+          ariConnected: debouncedBool(ariReported, ariFailStreak, prev.ariConnected),
           asteriskChannels: aiEngineDetails.asterisk_channels ?? 0,
-          localAIStatus: res.data.local_ai_server?.status === 'connected' ? 'connected' : 'error',
+          localAIStatus: debouncedTri(localAIConnected, localAIFailStreak, prev.localAIStatus),
           localAIModels: res.data.local_ai_server?.details?.models || null,
           providerHealth: aiEngineDetails.providers || {},
         }));
       } catch {
         if (!mounted) return;
+        // Full request failure (network, 401, etc.) counts as a miss for all
+        // three indicators.
         ariFailStreak += 1;
+        aiEngineFailStreak += 1;
+        localAIFailStreak += 1;
         setState(prev => ({
           ...prev,
-          aiEngineStatus: 'error',
-          // Same debounce as the success path. Initial null upgrades to false
-          // on the first hard failure since we have no prior good state to
-          // fall back to.
-          ariConnected:
-            prev.ariConnected === null || ariFailStreak >= 2 ? false : prev.ariConnected,
+          aiEngineStatus: debouncedTri(false, aiEngineFailStreak, prev.aiEngineStatus),
+          ariConnected: debouncedBool(false, ariFailStreak, prev.ariConnected),
           asteriskChannels: 0,
-          localAIStatus: 'error',
+          localAIStatus: debouncedTri(false, localAIFailStreak, prev.localAIStatus),
         }));
       }
     };
@@ -468,7 +499,7 @@ export const SystemTopology = () => {
             title="Go to AI Engine Settings →"
             className={`relative p-4 rounded-xl border backdrop-blur-sm transition-all duration-300 cursor-pointer hover:-translate-y-1 ${state.aiEngineStatus === 'error'
               ? 'border-red-500/50 bg-red-500/10 ring-1 ring-red-500/50'
-              : hasActiveCalls
+              : hasActiveCalls && state.aiEngineStatus === 'connected'
                 ? 'border-green-500/50 bg-green-500/10 shadow-[0_8px_30px_rgb(34,197,94,0.15)] ring-1 ring-green-500/50'
                 : 'border-border/60 bg-card/60 hover:bg-card/80 hover:border-primary/40 shadow-sm'
               }`}>
@@ -476,16 +507,20 @@ export const SystemTopology = () => {
               <div className="absolute inset-0 rounded-lg border-2 border-green-500 animate-ping opacity-20" />
             )}
             <div className="flex flex-col items-center gap-2">
-              <Cpu className={`w-8 h-8 ${state.aiEngineStatus === 'error' ? 'text-red-500' : hasActiveCalls ? 'text-green-500' : 'text-muted-foreground'
+              <Cpu className={`w-8 h-8 ${state.aiEngineStatus === 'error' ? 'text-red-500' : hasActiveCalls && state.aiEngineStatus === 'connected' ? 'text-green-500' : 'text-muted-foreground'
                 }`} />
               <div className="text-center">
-                <div className={`font-semibold ${state.aiEngineStatus === 'error' ? 'text-red-500' : hasActiveCalls ? 'text-green-500' : 'text-foreground'
+                <div className={`font-semibold ${state.aiEngineStatus === 'error' ? 'text-red-500' : hasActiveCalls && state.aiEngineStatus === 'connected' ? 'text-green-500' : 'text-foreground'
                   }`}>AI Engine</div>
                 <div className="text-xs text-muted-foreground">Core</div>
               </div>
               <div className="w-full pt-2 mt-2 border-t border-border/50">
                 <div className="flex items-center justify-center text-xs">
-                  {state.aiEngineStatus === 'connected' ? (
+                  {state.aiEngineStatus === 'unknown' ? (
+                    <span className="flex items-center gap-1 text-muted-foreground">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Checking…
+                    </span>
+                  ) : state.aiEngineStatus === 'connected' ? (
                     <span className="flex items-center gap-1 text-green-500">
                       <CheckCircle2 className="w-3 h-3" /> Healthy
                     </span>
@@ -756,7 +791,7 @@ export const SystemTopology = () => {
                 title="Go to Models →"
                 className={`flex flex-col justify-center relative w-full h-full p-4 rounded-xl border backdrop-blur-sm transition-all duration-300 cursor-pointer hover:-translate-y-1 ${state.localAIStatus === 'error'
                   ? 'border-red-500/50 bg-red-500/10 ring-1 ring-red-500/50'
-                  : isLocalAIActive
+                  : isLocalAIActive && state.localAIStatus === 'connected'
                     ? 'border-green-500/50 bg-green-500/10 shadow-[0_8px_30px_rgb(34,197,94,0.15)] ring-1 ring-green-500/50'
                     : 'border-border/60 bg-card/60 hover:bg-card/80 hover:border-primary/40 shadow-sm'
                   }`}>
@@ -764,16 +799,20 @@ export const SystemTopology = () => {
                   <div className="absolute inset-0 rounded-lg border-2 border-green-500 animate-ping opacity-20" />
                 )}
                 <div className="flex flex-col items-center gap-2">
-                  <Server className={`w-8 h-8 ${state.localAIStatus === 'error' ? 'text-red-500' : isLocalAIActive ? 'text-green-500' : 'text-muted-foreground'
+                  <Server className={`w-8 h-8 ${state.localAIStatus === 'error' ? 'text-red-500' : isLocalAIActive && state.localAIStatus === 'connected' ? 'text-green-500' : 'text-muted-foreground'
                     }`} />
                   <div className="text-center">
-                    <div className={`font-semibold ${state.localAIStatus === 'error' ? 'text-red-500' : isLocalAIActive ? 'text-green-500' : 'text-foreground'
+                    <div className={`font-semibold ${state.localAIStatus === 'error' ? 'text-red-500' : isLocalAIActive && state.localAIStatus === 'connected' ? 'text-green-500' : 'text-foreground'
                       }`}>Local AI</div>
                     <div className="text-xs text-muted-foreground">Server</div>
                   </div>
                   <div className="w-full pt-2 mt-2 border-t border-border/50">
                     <div className="flex items-center justify-center text-xs">
-                      {state.localAIStatus === 'connected' ? (
+                      {state.localAIStatus === 'unknown' ? (
+                        <span className="flex items-center gap-1 text-muted-foreground">
+                          <Loader2 className="w-3 h-3 animate-spin" /> Checking…
+                        </span>
+                      ) : state.localAIStatus === 'connected' ? (
                         <span className="flex items-center gap-1 text-green-500">
                           <CheckCircle2 className="w-3 h-3" /> Connected
                         </span>
