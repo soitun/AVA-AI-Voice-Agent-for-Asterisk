@@ -1,12 +1,14 @@
 import React from 'react';
-import { ExternalLink, Info, Mic } from 'lucide-react';
+import { Info, Mic } from 'lucide-react';
+import ProviderCredentialsCard from './ProviderCredentialsCard';
 
 interface ElevenLabsProviderFormProps {
     config: any;
     onChange: (newConfig: any) => void;
+    providerKey?: string;
 }
 
-const ElevenLabsProviderForm: React.FC<ElevenLabsProviderFormProps> = ({ config, onChange }) => {
+const ElevenLabsProviderForm: React.FC<ElevenLabsProviderFormProps> = ({ config, onChange, providerKey }) => {
     const handleChange = (field: string, value: any) => {
         onChange({ ...config, [field]: value });
     };
@@ -31,6 +33,45 @@ const ElevenLabsProviderForm: React.FC<ElevenLabsProviderFormProps> = ({ config,
 
     return (
         <div className="space-y-6">
+            <div>
+                <h4 className="font-semibold mb-3">Credentials</h4>
+                <div className="space-y-3">
+                    <ProviderCredentialsCard
+                        providerKey={providerKey}
+                        credentialType="api-key"
+                        label="ElevenLabs API Key"
+                        placeholder="xi-..."
+                        envVarFallback="ELEVENLABS_API_KEY"
+                        inlineValue={config.api_key}
+                        helpText={
+                            <>
+                                Find your key in the{' '}
+                                <a
+                                    href="https://elevenlabs.io/app/settings/api-keys"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-primary hover:underline"
+                                >
+                                    ElevenLabs Console
+                                </a>
+                                .
+                            </>
+                        }
+                    />
+                    {mode === 'agent' && (
+                        <ProviderCredentialsCard
+                            providerKey={providerKey}
+                            credentialType="agent-id"
+                            label="ElevenLabs Agent ID"
+                            placeholder="agent_..."
+                            envVarFallback="ELEVENLABS_AGENT_ID"
+                            inlineValue={config.agent_id}
+                            helpText="The Agent ID identifies which Conversational AI agent to use."
+                        />
+                    )}
+                </div>
+            </div>
+
             {/* Mode Selection */}
             <div className="space-y-2">
                 <label className="text-sm font-medium">Provider Mode</label>

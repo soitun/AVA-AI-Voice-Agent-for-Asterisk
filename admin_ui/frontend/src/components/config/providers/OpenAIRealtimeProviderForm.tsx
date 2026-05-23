@@ -1,11 +1,13 @@
 import React from 'react';
+import ProviderCredentialsCard from './ProviderCredentialsCard';
 
 interface OpenAIRealtimeProviderFormProps {
     config: any;
     onChange: (newConfig: any) => void;
+    providerKey?: string;
 }
 
-const OpenAIRealtimeProviderForm: React.FC<OpenAIRealtimeProviderFormProps> = ({ config, onChange }) => {
+const OpenAIRealtimeProviderForm: React.FC<OpenAIRealtimeProviderFormProps> = ({ config, onChange, providerKey }) => {
     const handleChange = (field: string, value: any) => {
         onChange({ ...config, [field]: value });
     };
@@ -28,6 +30,32 @@ const OpenAIRealtimeProviderForm: React.FC<OpenAIRealtimeProviderFormProps> = ({
 
     return (
         <div className="space-y-6">
+            <div>
+                <h4 className="font-semibold mb-3">Credentials</h4>
+                <ProviderCredentialsCard
+                    providerKey={providerKey}
+                    credentialType="api-key"
+                    label="OpenAI API Key"
+                    placeholder="sk-..."
+                    envVarFallback="OPENAI_API_KEY"
+                    inlineValue={config.api_key}
+                    helpText={
+                        <>
+                            Find your key at{' '}
+                            <a
+                                href="https://platform.openai.com/api-keys"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-primary hover:underline"
+                            >
+                                platform.openai.com/api-keys
+                            </a>
+                            . Per-instance keys override the env var fallback.
+                        </>
+                    }
+                />
+            </div>
+
             <div>
                 <h4 className="font-semibold mb-3">API Endpoint</h4>
                 <div className="space-y-2">

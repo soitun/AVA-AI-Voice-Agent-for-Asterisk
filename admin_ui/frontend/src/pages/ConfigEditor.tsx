@@ -361,11 +361,14 @@ const ConfigEditor = () => {
                 FormComponent = DeepgramProviderForm;
         }
 
+        // Per-instance credentials only work for saved YAML entries.
+        const credKey = isNewProvider ? undefined : (editingProvider || undefined);
+
         return (
             <div className="space-y-4">
                 {commonFields}
                 <div className="border-t pt-4">
-                    <FormComponent config={providerForm} onChange={updateForm} />
+                    <FormComponent config={providerForm} onChange={updateForm} providerKey={credKey} />
                 </div>
             </div>
         );

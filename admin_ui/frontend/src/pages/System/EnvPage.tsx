@@ -6,8 +6,28 @@ import { Save, Eye, EyeOff, RefreshCw, AlertTriangle, AlertCircle, CheckCircle, 
 import { ConfigSection } from '../../components/ui/ConfigSection';
 import { ConfigCard } from '../../components/ui/ConfigCard';
 import { FormInput, FormLabel, FormSelect, FormSwitch } from '../../components/ui/FormComponents';
+import { Link } from 'react-router-dom';
 
 import { useAuth } from '../../auth/AuthContext';
+
+const PROVIDER_CREDENTIAL_TYPES: Record<string, string[]> = {
+    openai_realtime: ['api-key'],
+    deepgram: ['api-key'],
+    google_live: ['api-key', 'vertex-json'],
+    elevenlabs_agent: ['api-key', 'agent-id'],
+    grok: ['api-key'],
+};
+
+interface PerInstanceCredentialRow {
+    providerKey: string;
+    kind: string;
+    credentialType: string;
+    state: 'file_uploaded' | 'env_var_ref' | 'not_configured' | 'inline_value';
+    path?: string;
+    envVar?: string;
+    inlineValue?: string;
+    uploadedAt?: number;
+}
 
 type EnvTab = 'ai-engine' | 'local-ai' | 'system';
 
@@ -64,6 +84,8 @@ const EnvPage = () => {
     const [smtpTestTo, setSmtpTestTo] = useState('');
     const [smtpTesting, setSmtpTesting] = useState(false);
     const [smtpTestResult, setSmtpTestResult] = useState<{success: boolean; message?: string; error?: string} | null>(null);
+    const [perInstanceRows, setPerInstanceRows] = useState<PerInstanceCredentialRow[]>([]);
+    const [perInstanceLoading, setPerInstanceLoading] = useState(false);
 
     const [error, setError] = useState<string | null>(null);
 
@@ -121,8 +143,97 @@ const EnvPage = () => {
     useEffect(() => {
         if (!authLoading && token) {
             fetchEnv();
+            fetchPerInstanceCredentials();
         }
     }, [authLoading, token]);
+
+    /**
+     * Enumerate all full-agent provider instances and probe each for credential status.
+     * Read-only audit — actual uploads happen on the Providers page.
+     */
+    const fetchPerInstanceCredentials = async () => {
+        setPerInstanceLoading(true);
+        try {
+            const yamlRes = await axios.get('/api/config/yaml');
+            // The /yaml endpoint returns {content: "<yaml string>"} or the parsed object.
+            let providers: Record<string, any> = {};
+            const raw = yamlRes.data?.content || yamlRes.data;
+            if (typeof raw === 'string') {
+                // Avoid pulling in js-yaml just for this — let the backend's /api/config
+                // endpoint give us a structured view if /yaml returned a string.
+                const cfgRes = await axios.get('/api/config');
+                providers = cfgRes.data?.providers || {};
+            } else {
+                providers = raw?.providers || {};
+            }
+
+            // For each provider entry, identify its kind and fetch credential status.
+            const entries = Object.entries(providers) as Array<[string, any]>;
+            const tasks = entries.map(async ([key, cfg]) => {
+                const explicitType = (cfg?.type || '').toLowerCase();
+                // Map either explicit type OR canonical YAML key to a full-agent kind.
+                const kind =
+                    explicitType in PROVIDER_CREDENTIAL_TYPES
+                        ? explicitType
+                        : key in PROVIDER_CREDENTIAL_TYPES
+                            ? key
+                            : null;
+                if (!kind) return [];
+
+                const credTypes = PROVIDER_CREDENTIAL_TYPES[kind];
+                const rows: PerInstanceCredentialRow[] = [];
+
+                // Best-effort: GET /credentials may 404 if the provider is being created or
+                // misconfigured. We render what we can from the YAML in that case.
+                let credStatus: any = {};
+                try {
+                    const res = await axios.get(`/api/config/providers/${encodeURIComponent(key)}/credentials`);
+                    credStatus = res.data?.credentials || {};
+                } catch {
+                    // Leave credStatus empty; classify rows from inline YAML below.
+                }
+
+                for (const credentialType of credTypes) {
+                    const status = credStatus[credentialType] || {};
+                    // Match the YAML field associated with this credential.
+                    const inlineField =
+                        credentialType === 'api-key' ? 'api_key' :
+                        credentialType === 'agent-id' ? 'agent_id' :
+                        credentialType === 'vertex-json' ? 'credentials_path' : null;
+                    const inlineValue = inlineField ? (cfg?.[inlineField] || '') : '';
+                    const isEnvRef = typeof inlineValue === 'string' && inlineValue.trim().startsWith('${');
+
+                    let state: PerInstanceCredentialRow['state'];
+                    if (status.uploaded) state = 'file_uploaded';
+                    else if (isEnvRef) state = 'env_var_ref';
+                    else if (inlineValue && typeof inlineValue === 'string' && inlineValue.trim()) state = 'inline_value';
+                    else state = 'not_configured';
+
+                    rows.push({
+                        providerKey: key,
+                        kind,
+                        credentialType,
+                        state,
+                        path: status.path,
+                        envVar: isEnvRef
+                            ? inlineValue.trim().replace(/^\$\{/, '').replace(/\}$/, '').split(':-')[0]
+                            : undefined,
+                        inlineValue: !isEnvRef && state === 'inline_value' ? '(inline value)' : undefined,
+                        uploadedAt: status.uploaded_at,
+                    });
+                }
+                return rows;
+            });
+
+            const all = (await Promise.all(tasks)).flat();
+            setPerInstanceRows(all);
+        } catch {
+            // Best-effort; leave the section empty.
+            setPerInstanceRows([]);
+        } finally {
+            setPerInstanceLoading(false);
+        }
+    };
 
     const fetchEnv = async () => {
         setLoading(true);
@@ -737,6 +848,73 @@ const EnvPage = () => {
                         />
                     </div>
                     </ConfigCard>
+                    </ConfigSection>
+
+                    {/* Per-Instance Provider Credentials (multi-tenant audit) */}
+                    <ConfigSection
+                        title="Per-Instance Provider Credentials"
+                        description="Status of credential files for each configured full-agent provider instance. Upload and edit on the Providers page."
+                    >
+                        <ConfigCard>
+                            {perInstanceLoading ? (
+                                <div className="flex items-center gap-2 text-sm text-muted-foreground p-2">
+                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                    Loading provider credentials…
+                                </div>
+                            ) : perInstanceRows.length === 0 ? (
+                                <p className="text-sm text-muted-foreground p-2">
+                                    No full-agent providers configured yet. Visit{' '}
+                                    <Link to="/providers" className="text-primary hover:underline">Providers</Link>{' '}
+                                    to add one.
+                                </p>
+                            ) : (
+                                <div className="space-y-2">
+                                    {perInstanceRows.map((row) => {
+                                        const stateLabel = {
+                                            file_uploaded: { text: 'File uploaded', color: 'text-green-700 dark:text-green-400', icon: <CheckCircle className="w-3.5 h-3.5" /> },
+                                            env_var_ref: { text: `env var ${row.envVar}`, color: 'text-blue-700 dark:text-blue-400', icon: <CheckCircle className="w-3.5 h-3.5" /> },
+                                            inline_value: { text: 'inline value set', color: 'text-yellow-700 dark:text-yellow-400', icon: <AlertCircle className="w-3.5 h-3.5" /> },
+                                            not_configured: { text: 'not configured', color: 'text-red-700 dark:text-red-400', icon: <XCircle className="w-3.5 h-3.5" /> },
+                                        }[row.state];
+                                        return (
+                                            <div
+                                                key={`${row.providerKey}.${row.credentialType}`}
+                                                className="flex items-center gap-3 p-3 border border-input rounded-md hover:bg-muted/30 transition-colors"
+                                            >
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                        <span className="font-mono text-sm font-medium">{row.providerKey}</span>
+                                                        <span className="text-xs text-muted-foreground">({row.kind})</span>
+                                                        <span className="text-xs text-muted-foreground">·</span>
+                                                        <span className="text-xs">{row.credentialType}</span>
+                                                    </div>
+                                                    <div className={`flex items-center gap-1 text-xs mt-1 ${stateLabel.color}`}>
+                                                        {stateLabel.icon}
+                                                        <span>{stateLabel.text}</span>
+                                                        {row.path && row.state === 'file_uploaded' && (
+                                                            <span className="text-muted-foreground font-mono truncate ml-2" title={row.path}>
+                                                                — {row.path}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <Link
+                                                    to="/providers"
+                                                    className="text-xs text-primary hover:underline whitespace-nowrap"
+                                                    title="Open the Providers page to edit this provider"
+                                                >
+                                                    Edit →
+                                                </Link>
+                                            </div>
+                                        );
+                                    })}
+                                    <p className="text-xs text-muted-foreground pt-2">
+                                        Files at <code>/app/project/secrets/providers/&lt;key&gt;/api-key</code> override
+                                        the env vars above. The Providers page is the source of truth for per-instance edits.
+                                    </p>
+                                </div>
+                            )}
+                        </ConfigCard>
                     </ConfigSection>
 
                     {/* Email Delivery (SMTP) */}
