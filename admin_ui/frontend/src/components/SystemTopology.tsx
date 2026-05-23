@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Phone, Cpu, Server, Mic, MessageSquare, Volume2, Zap, Radio, CheckCircle2, XCircle, Layers } from 'lucide-react';
+import { Phone, Cpu, Server, Mic, MessageSquare, Volume2, Zap, Radio, CheckCircle2, XCircle, Layers, Loader2 } from 'lucide-react';
 import axios from 'axios';
 import yaml from 'js-yaml';
 import { FullscreenPanel } from './ui/FullscreenPanel';
+import { isFullAgentProvider } from '../utils/providerNaming';
 
 interface CallState {
   call_id: string;
@@ -37,7 +38,11 @@ interface LocalAIModels {
 
 interface TopologyState {
   aiEngineStatus: 'connected' | 'error' | 'unknown';
-  ariConnected: boolean;
+  // `null` = haven't checked yet (initial render); `true`/`false` = the most
+  // recent confirmed state from /api/system/health. Distinguishing "unknown"
+  // from "false" prevents the dashboard from asserting "ARI Disconnected"
+  // in red during the brief window between mount and first fetch resolving.
+  ariConnected: boolean | null;
   asteriskChannels: number;  // Pre-stasis + in-stasis calls (for Asterisk PBX indicator)
   localAIStatus: 'connected' | 'error' | 'unknown';
   localAIModels: LocalAIModels | null;
@@ -49,28 +54,21 @@ interface TopologyState {
   activeCalls: Map<string, CallState>;
 }
 
-// Full agent providers (not modular pipeline components)
-// These handle STT+LLM+TTS internally as complete agents
-const FULL_AGENT_PROVIDERS = new Set([
-  'local',
-  'deepgram',
-  'openai_realtime',
-  'google_live',
-  'elevenlabs_agent',
-  'grok',
-]);
-
-const providerKind = (name: string, config: any): string => {
-  const type = typeof config?.type === 'string' ? config.type : '';
-  if (type === 'full' && FULL_AGENT_PROVIDERS.has(name)) return name;
-  return type || name;
-};
-
-const isFullAgentProvider = (name: string, config: any): boolean => {
-  const kind = providerKind(name, config);
-  if (FULL_AGENT_PROVIDERS.has(kind)) return true;
-  const caps = Array.isArray(config?.capabilities) ? config.capabilities : [];
-  return caps.includes('stt') && caps.includes('llm') && caps.includes('tts');
+/**
+ * Derive a canonical "kind" string for display + DISPLAY_NAMES lookup.
+ *
+ * The previous local copy of this used a FULL_AGENT_PROVIDERS allowlist that
+ * incorrectly mapped modular `local_stt` / `local_llm` / `local_tts` entries
+ * (each with `type: 'local'` and a single capability) onto the 'local'
+ * canonical kind, causing them to be misclassified as full agents on the
+ * dashboard. The is-full-agent classification now defers to the shared
+ * `isFullAgentProvider` utility (which checks capability count); this helper
+ * only resolves a display kind.
+ */
+const getProviderKind = (name: string, config: any): string => {
+  const type = typeof config?.type === 'string' ? config.type.toLowerCase() : '';
+  if (!type || type === 'full') return name.toLowerCase();
+  return type;
 };
 
 // Provider display name mapping
@@ -84,7 +82,7 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
 export const SystemTopology = () => {
   const [state, setState] = useState<TopologyState>({
     aiEngineStatus: 'unknown',
-    ariConnected: false,
+    ariConnected: null,
     asteriskChannels: 0,
     localAIStatus: 'unknown',
     localAIModels: null,
@@ -98,26 +96,59 @@ export const SystemTopology = () => {
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
-  // Fetch health status
+  // Fetch health status.
+  //
+  // Why two-strike debounce: a single transient network blip (server SSH
+  // refusing for 30s, a docker compose recreate of admin_ui, etc.) shouldn't
+  // flip the dashboard to red. We require two consecutive failed/disconnected
+  // reads before reporting "disconnected" — a single success in between resets
+  // the counter. The first read after mount is allowed to set the state
+  // directly so the initial "Checking…" pill becomes a definite state ASAP.
   useEffect(() => {
+    let ariFailStreak = 0;
+    let mounted = true;
     const fetchHealth = async () => {
       try {
         const res = await axios.get('/api/system/health');
+        if (!mounted) return;
         const aiEngineDetails = res.data.ai_engine?.details || {};
+        const ariReported: boolean = Boolean(
+          aiEngineDetails.ari_connected ?? aiEngineDetails.asterisk?.connected ?? false,
+        );
+        if (ariReported) {
+          ariFailStreak = 0;
+        } else {
+          ariFailStreak += 1;
+        }
         setState(prev => ({
           ...prev,
           aiEngineStatus: res.data.ai_engine?.status === 'connected' ? 'connected' : 'error',
-          ariConnected: aiEngineDetails.ari_connected ?? aiEngineDetails.asterisk?.connected ?? false,
+          // Debounce: stay on the previous value after a single negative read,
+          // unless we haven't reported a state yet (prev.ariConnected === null)
+          // in which case go ahead and surface the reported value so the
+          // initial "Checking…" indicator resolves promptly.
+          ariConnected:
+            ariReported
+              ? true
+              : prev.ariConnected === null || ariFailStreak >= 2
+                ? false
+                : prev.ariConnected,
           asteriskChannels: aiEngineDetails.asterisk_channels ?? 0,
           localAIStatus: res.data.local_ai_server?.status === 'connected' ? 'connected' : 'error',
           localAIModels: res.data.local_ai_server?.details?.models || null,
           providerHealth: aiEngineDetails.providers || {},
         }));
       } catch {
+        if (!mounted) return;
+        ariFailStreak += 1;
         setState(prev => ({
           ...prev,
           aiEngineStatus: 'error',
-          ariConnected: false,
+          // Same debounce as the success path. Initial null upgrades to false
+          // on the first hard failure since we have no prior good state to
+          // fall back to.
+          ariConnected:
+            prev.ariConnected === null || ariFailStreak >= 2 ? false : prev.ariConnected,
           asteriskChannels: 0,
           localAIStatus: 'error',
         }));
@@ -125,7 +156,10 @@ export const SystemTopology = () => {
     };
     fetchHealth();
     const interval = setInterval(fetchHealth, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   // Fetch config (providers, pipelines)
@@ -139,10 +173,14 @@ export const SystemTopology = () => {
         const providers: ProviderConfig[] = [];
         if (parsed?.providers && typeof parsed.providers === 'object') {
           for (const [name, config] of Object.entries(parsed.providers)) {
-            // Only include full agent providers, skip modular components like local_stt, groq_llm, etc.
-            if (isFullAgentProvider(name, config)) {
+            // Only include full agent providers. The shared utility correctly
+            // excludes modular slots like local_stt / local_llm / local_tts
+            // (each with `type: 'local'` and a single capability) — its
+            // signature is `(provider, key)`, with the key used for canonical
+            // legacy-form detection.
+            if (isFullAgentProvider(config, name)) {
               const cfg = config as any;
-              const kind = providerKind(name, cfg);
+              const kind = getProviderKind(name, cfg);
               // Check if enabled - defaults to true if not specified
               const enabled = cfg?.enabled !== false;
               // Provider ready status comes from health check, default to false if not found
@@ -258,6 +296,36 @@ export const SystemTopology = () => {
   const hasActiveCalls = totalActiveCalls > 0;
   const hasAsteriskChannels = state.asteriskChannels > 0;  // Pre-stasis + in-stasis
 
+  /**
+   * Group configured full-agent providers by `kind` so multi-instance
+   * deployments (e.g. `grok` + `acme_grok` + `globex_grok`) collapse into a
+   * single card with one row per instance — instead of N flat cards down the
+   * page. Singletons render the same shape with a single row, so the visual
+   * is consistent for both 1-tenant and multi-tenant configs.
+   *
+   * Ordering: stable insertion order from the YAML, kinds appear in the
+   * order their first instance is encountered.
+   */
+  const providerGroups = useMemo(() => {
+    const groups: Array<{ kind: string; kindLabel: string; providers: ProviderConfig[]; hasActive: boolean }> = [];
+    const byKind = new Map<string, number>();
+    for (const provider of state.configuredProviders) {
+      const idx = byKind.get(provider.kind);
+      if (idx === undefined) {
+        byKind.set(provider.kind, groups.length);
+        const kindLabel = PROVIDER_DISPLAY_NAMES[provider.kind]
+          || provider.kind.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        groups.push({ kind: provider.kind, kindLabel, providers: [provider], hasActive: false });
+      } else {
+        groups[idx].providers.push(provider);
+      }
+    }
+    for (const group of groups) {
+      group.hasActive = group.providers.some(p => (activeProviders.get(p.name) || 0) > 0);
+    }
+    return groups;
+  }, [state.configuredProviders, activeProviders]);
+
   // Determine which local models are being used by active pipelines
   const localUsageFromPipelines = useMemo(() => {
     const active = { stt: false, llm: false, tts: false };
@@ -356,7 +424,11 @@ export const SystemTopology = () => {
               <div className="w-full pt-2 mt-2 border-t border-border/50 space-y-1">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-muted-foreground">ARI</span>
-                  {state.ariConnected ? (
+                  {state.ariConnected === null ? (
+                    <span className="flex items-center gap-1 text-muted-foreground">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Checking…
+                    </span>
+                  ) : state.ariConnected ? (
                     <span className="flex items-center gap-1 text-green-500">
                       <CheckCircle2 className="w-3 h-3" /> Connected
                     </span>
@@ -451,50 +523,95 @@ export const SystemTopology = () => {
               >Providers</div>
             </div>
             <div className="flex flex-col gap-2">
-              {state.configuredProviders.length === 0 ? (
+              {providerGroups.length === 0 ? (
                 <div className="p-3 rounded-lg border border-dashed border-border text-xs text-muted-foreground text-center">
                   No agents
                 </div>
               ) : (
-                state.configuredProviders.map(provider => {
-                  const activeCount = activeProviders.get(provider.name) || 0;
-                  const isActive = activeCount > 0;
-                  const isDefault = provider.name === state.defaultProvider;
-
-                  const getIconColor = () => {
-                    if (!provider.enabled) return 'text-orange-500';
-                    if (provider.enabled && provider.ready) return 'text-green-500';
-                    return 'text-red-500';
-                  };
-                  const iconColor = getIconColor();
-
-                  const cellClass = isActive
+                providerGroups.map(group => {
+                  const groupClass = group.hasActive
                     ? 'border-green-500/50 bg-green-500/10 shadow-[0_4px_15px_rgb(34,197,94,0.1)] ring-1 ring-green-500/30'
-                    : 'border-border/60 bg-card/60 hover:bg-card/80 shadow-sm';
-
+                    : 'border-border/60 bg-card/60 shadow-sm';
                   return (
-                    <div
-                      key={provider.name}
-                      onClick={() => navigate('/providers')}
-                      title={`Configure ${provider.displayName} (${provider.subtitle}) →`}
-                      className={`relative flex items-center gap-2 p-2 px-3 rounded-xl border backdrop-blur-sm transition-all duration-300 cursor-pointer hover:-translate-y-[1px] ${cellClass}`}
-                    >
-                      {isActive && (
-                        <div className="absolute inset-0 rounded-lg border border-green-500 animate-ping opacity-20" />
-                      )}
-                      <Zap className={`w-4 h-4 flex-shrink-0 ${iconColor}`} />
-                      <span className={`text-xs font-medium truncate ${isActive ? 'text-green-500' : 'text-foreground'}`}>
-                        <span className="block truncate">{provider.displayName}</span>
-                        <span className="block truncate text-[10px] font-normal text-muted-foreground">
-                          {provider.subtitle}
-                        </span>
-                      </span>
-                      {isDefault && <div className="w-2.5 h-2.5 rounded-full bg-yellow-500 ml-auto flex-shrink-0" title="Default Provider" />}
-                      {isActive && (
-                        <span className="ml-auto px-1.5 py-0.5 rounded-full bg-green-500 text-white text-[10px] font-bold flex-shrink-0">
-                          {activeCount}
-                        </span>
-                      )}
+                    <div key={group.kind} className={`rounded-xl border backdrop-blur-sm transition-all duration-300 ${groupClass}`}>
+                      {/* Group header: provider kind + multi-instance badge */}
+                      <div className="flex items-center justify-between gap-2 px-3 pt-2 pb-1">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Zap className={`w-3.5 h-3.5 flex-shrink-0 ${group.hasActive ? 'text-green-500' : 'text-muted-foreground'}`} />
+                          <span className="text-xs font-semibold text-foreground truncate">{group.kindLabel}</span>
+                        </div>
+                        {group.providers.length > 1 && (
+                          <span
+                            className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground flex-shrink-0"
+                            title={`${group.providers.length} configured instances of this provider kind`}
+                          >
+                            ×{group.providers.length}
+                          </span>
+                        )}
+                      </div>
+                      {/* Instance rows: one per configured provider of this kind */}
+                      <div className="px-2 pb-2 pt-1 space-y-1">
+                        {group.providers.map(provider => {
+                          const activeCount = activeProviders.get(provider.name) || 0;
+                          const isActive = activeCount > 0;
+                          const isDefault = provider.name === state.defaultProvider;
+                          const dotColor = !provider.enabled
+                            ? 'bg-orange-500'
+                            : provider.ready
+                              ? 'bg-green-500'
+                              : 'bg-red-500';
+                          // Sub-row: instance name + customer/subtitle. For singleton groups
+                          // the displayName already matches the kindLabel header, but the
+                          // sub-row still earns its keep by showing the YAML key, status
+                          // dot, default star, and active-call badge.
+                          const lineLabel = provider.name;
+                          const lineSubtitle = provider.displayName !== group.kindLabel
+                            ? provider.displayName
+                            : (provider.subtitle.includes('·')
+                                ? provider.subtitle.split('·').slice(1).join('·').trim() || ''
+                                : '');
+                          return (
+                            <div
+                              key={provider.name}
+                              onClick={() => navigate('/providers')}
+                              title={`Configure ${provider.displayName} (${provider.subtitle}) →`}
+                              className="relative flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-background/50 cursor-pointer transition-colors"
+                            >
+                              {isActive && (
+                                <div className="absolute inset-0 rounded-lg border border-green-500 animate-ping opacity-20 pointer-events-none" />
+                              )}
+                              <div
+                                className={`w-2 h-2 rounded-full flex-shrink-0 ${dotColor}`}
+                                title={
+                                  !provider.enabled ? 'Disabled' :
+                                  provider.ready ? 'Ready' : 'Not ready'
+                                }
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className={`text-xs font-medium truncate ${isActive ? 'text-green-500' : 'text-foreground'}`}>
+                                  {lineLabel}
+                                </div>
+                                {lineSubtitle && (
+                                  <div className="text-[10px] text-muted-foreground truncate">
+                                    {lineSubtitle}
+                                  </div>
+                                )}
+                              </div>
+                              {isDefault && (
+                                <div
+                                  className="w-2 h-2 rounded-full bg-yellow-500 flex-shrink-0"
+                                  title="Default Provider"
+                                />
+                              )}
+                              {isActive && (
+                                <span className="px-1.5 py-0.5 rounded-full bg-green-500 text-white text-[10px] font-bold flex-shrink-0">
+                                  {activeCount}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   );
                 })
