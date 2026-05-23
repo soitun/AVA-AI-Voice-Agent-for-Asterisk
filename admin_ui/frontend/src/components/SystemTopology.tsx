@@ -57,6 +57,7 @@ const FULL_AGENT_PROVIDERS = new Set([
   'openai_realtime',
   'google_live',
   'elevenlabs_agent',
+  'grok',
 ]);
 
 const providerKind = (name: string, config: any): string => {

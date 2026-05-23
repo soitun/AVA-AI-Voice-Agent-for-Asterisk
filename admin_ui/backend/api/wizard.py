@@ -752,6 +752,7 @@ async def load_existing_config():
             "google_key": env_values.get("GOOGLE_API_KEY", ""),
             "elevenlabs_key": env_values.get("ELEVENLABS_API_KEY", ""),
             "elevenlabs_agent_id": env_values.get("ELEVENLABS_AGENT_ID", ""),
+            "xai_key": env_values.get("XAI_API_KEY", ""),
             "local_stt_backend": env_values.get("LOCAL_STT_BACKEND", "vosk"),
             "local_tts_backend": env_values.get("LOCAL_TTS_BACKEND", "piper"),
             "kroko_embedded": _parse_optional_bool(env_values.get("KROKO_EMBEDDED")) is True,
@@ -2806,6 +2807,35 @@ async def validate_api_key(validation: ApiKeyValidation):
                 else:
                     return {"valid": False, "error": f"API error: HTTP {response.status_code}"}
 
+            elif provider == "grok":
+                # xAI exposes an OpenAI-compatible /v1/models endpoint.
+                # 200 = key valid; 403 with team_blocked usually means "no credits/license yet".
+                response = await client.get(
+                    "https://api.x.ai/v1/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=10.0,
+                )
+                if response.status_code == 200:
+                    return {"valid": True, "message": "xAI API key is valid"}
+                if response.status_code == 401:
+                    return {"valid": False, "error": "Invalid xAI API key"}
+                if response.status_code == 403:
+                    detail = ""
+                    try:
+                        body = response.json()
+                        detail = body.get("error") or body.get("message") or ""
+                    except ValueError:
+                        detail = response.text or ""
+                    return {
+                        "valid": False,
+                        "error": (
+                            "xAI rejected the key (403). Common cause: team has no credits or licenses yet — "
+                            "add credits at https://console.x.ai/."
+                            + (f" Details: {detail}" if detail else "")
+                        ),
+                    }
+                return {"valid": False, "error": f"API error: HTTP {response.status_code}"}
+
             else:
                 return {"valid": False, "error": f"Unknown provider: {provider}"}
                 
@@ -2920,6 +2950,7 @@ class SetupConfig(BaseModel):
     elevenlabs_agent_id: Optional[str] = None
     cartesia_key: Optional[str] = None
     camb_key: Optional[str] = None
+    xai_key: Optional[str] = None
     greeting: str
     ai_name: str
     ai_role: str
@@ -2974,6 +3005,8 @@ async def save_setup_config(config: SetupConfig):
             raise HTTPException(status_code=400, detail="Deepgram API Key is required for CAMB AI pipeline (STT)")
         if not config.openai_key:
             raise HTTPException(status_code=400, detail="OpenAI API Key is required for CAMB AI pipeline (LLM)")
+    if config.provider == "grok" and not config.xai_key:
+        raise HTTPException(status_code=400, detail="xAI API Key is required for Grok Voice Agent provider")
 
     try:
         import shutil
@@ -3017,6 +3050,8 @@ async def save_setup_config(config: SetupConfig):
             env_updates["CARTESIA_API_KEY"] = config.cartesia_key
         if config.camb_key:
             env_updates["CAMB_API_KEY"] = config.camb_key
+        if config.xai_key:
+            env_updates["XAI_API_KEY"] = config.xai_key
 
         if config.provider in ("local", "local_hybrid"):
             catalog = get_full_catalog()
@@ -3168,7 +3203,7 @@ async def save_setup_config(config: SetupConfig):
                     )
             
             # Full agent providers - clear active_pipeline when setting as default
-            if config.provider in ["openai_realtime", "deepgram", "google_live", "elevenlabs_agent", "local"]:
+            if config.provider in ["openai_realtime", "deepgram", "google_live", "elevenlabs_agent", "local", "grok"]:
                 yaml_config["default_provider"] = config.provider
                 yaml_config["active_pipeline"] = None  # Full agents don't use pipelines
             
@@ -3245,6 +3280,38 @@ async def save_setup_config(config: SetupConfig):
                         "target_encoding": "ulaw",
                         "target_sample_rate_hz": 8000
                     })
+
+            elif config.provider == "grok":
+                providers.setdefault("grok", {})["enabled"] = True
+                if not provider_exists("grok"):
+                    providers["grok"].update({
+                        "type": "grok",
+                        "api_key": "${XAI_API_KEY}",
+                        "base_url": "wss://api.x.ai/v1/realtime",
+                        "model": "grok-voice-latest",
+                        "voice": "eve",
+                        "capabilities": ["stt", "llm", "tts"],
+                        # Audio: μ-law in / PCM16-24k out (xAI emits 24 kHz PCM16 regardless of
+                        # output_format declaration). See docs/Provider-Grok-Setup.md.
+                        "input_encoding": "ulaw",
+                        "input_sample_rate_hz": 8000,
+                        "provider_input_encoding": "ulaw",
+                        "provider_input_sample_rate_hz": 8000,
+                        "output_encoding": "linear16",
+                        "output_sample_rate_hz": 24000,
+                        "target_encoding": "ulaw",
+                        "target_sample_rate_hz": 8000,
+                        "response_modalities": ["audio", "text"],
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.5,
+                            "silence_duration_ms": 1000,
+                            "prefix_padding_ms": 300,
+                        },
+                        "session_warn_after_seconds": 1680,  # 28 min (30-min xAI hard cap)
+                    })
+                providers["grok"]["greeting"] = config.greeting
+                providers["grok"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise. Always speak your responses out loud."
 
             elif config.provider == "local":
                 providers.setdefault("local", {})["enabled"] = True

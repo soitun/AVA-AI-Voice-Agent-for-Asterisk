@@ -152,8 +152,35 @@ const GrokProviderForm: React.FC<GrokProviderFormProps> = ({ config, onChange })
             </div>
 
             <div>
-                <h4 className="font-semibold mb-3">Audio Format</h4>
+                <h4 className="font-semibold mb-3">Audio Format — Inbound (Asterisk → xAI)</h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium">AudioSocket Source Encoding</label>
+                        <select
+                            className="w-full p-2 rounded border border-input bg-background"
+                            value={config.input_encoding || 'ulaw'}
+                            onChange={(e) => handleChange('input_encoding', e.target.value)}
+                        >
+                            <option value="ulaw">μ-law (G.711) — Asterisk telephony native</option>
+                            <option value="slin16">slin16 (PCM16 @ 16 kHz)</option>
+                            <option value="slin">slin (PCM16 @ 8 kHz)</option>
+                        </select>
+                        <p className="text-xs text-muted-foreground">
+                            What AudioSocket sends us. <code>ulaw</code> matches the default Asterisk setup.
+                        </p>
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium">AudioSocket Source Sample Rate (Hz)</label>
+                        <input
+                            type="number"
+                            className="w-full p-2 rounded border border-input bg-background"
+                            value={config.input_sample_rate_hz ?? 8000}
+                            onChange={(e) => handleChange('input_sample_rate_hz', parseInt(e.target.value, 10) || 8000)}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                            <code>8000</code> for μ-law/slin; <code>16000</code> for slin16.
+                        </p>
+                    </div>
                     <div className="space-y-2">
                         <label className="text-sm font-medium">Provider Input Encoding</label>
                         <select
@@ -165,6 +192,7 @@ const GrokProviderForm: React.FC<GrokProviderFormProps> = ({ config, onChange })
                             <option value="linear16">PCM16 (fallback — adds resample step)</option>
                         </select>
                         <p className="text-xs text-muted-foreground">
+                            Format declared to xAI in <code>session.update.audio.input.format</code>.
                             μ-law passes Asterisk's native frames straight through with no resampling.
                         </p>
                     </div>
@@ -180,6 +208,100 @@ const GrokProviderForm: React.FC<GrokProviderFormProps> = ({ config, onChange })
                             Use <code>8000</code> for μ-law; <code>16000</code> or <code>24000</code> for PCM16.
                         </p>
                     </div>
+                </div>
+            </div>
+
+            <div>
+                <h4 className="font-semibold mb-3">Audio Format — Outbound (xAI → AudioSocket)</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium">Provider Output Encoding</label>
+                        <select
+                            className="w-full p-2 rounded border border-input bg-background"
+                            value={config.output_encoding || 'linear16'}
+                            onChange={(e) => handleChange('output_encoding', e.target.value)}
+                        >
+                            <option value="linear16">PCM16 (linear16) — what xAI actually emits</option>
+                            <option value="ulaw">μ-law (8 kHz)</option>
+                            <option value="alaw">A-law (8 kHz)</option>
+                        </select>
+                        <p className="text-xs text-muted-foreground">
+                            xAI ignores per-session output_format declarations and emits 24 kHz PCM16 regardless,
+                            so leave on <code>linear16</code> unless xAI's behavior changes.
+                        </p>
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium">Provider Output Sample Rate (Hz)</label>
+                        <input
+                            type="number"
+                            className="w-full p-2 rounded border border-input bg-background"
+                            value={config.output_sample_rate_hz ?? 24000}
+                            onChange={(e) => handleChange('output_sample_rate_hz', parseInt(e.target.value, 10) || 24000)}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                            xAI's actual native output rate. <code>24000</code> is correct as of 2026-05.
+                        </p>
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium">AudioSocket Target Encoding</label>
+                        <select
+                            className="w-full p-2 rounded border border-input bg-background"
+                            value={config.target_encoding || 'ulaw'}
+                            onChange={(e) => handleChange('target_encoding', e.target.value)}
+                        >
+                            <option value="ulaw">μ-law (G.711) — Asterisk default</option>
+                            <option value="slin">slin (PCM16 @ 8 kHz)</option>
+                            <option value="slin16">slin16 (PCM16 @ 16 kHz)</option>
+                        </select>
+                        <p className="text-xs text-muted-foreground">
+                            What we send to Asterisk after resampling xAI's 24 kHz PCM16 down.
+                        </p>
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium">AudioSocket Target Sample Rate (Hz)</label>
+                        <input
+                            type="number"
+                            className="w-full p-2 rounded border border-input bg-background"
+                            value={config.target_sample_rate_hz ?? 8000}
+                            onChange={(e) => handleChange('target_sample_rate_hz', parseInt(e.target.value, 10) || 8000)}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                            <code>8000</code> for telephony. Higher rates only if AudioSocket is configured wideband.
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <div>
+                <h4 className="font-semibold mb-3">Response Modalities</h4>
+                <div className="space-y-2">
+                    <div className="flex flex-wrap gap-4">
+                        {(['audio', 'text'] as const).map((modality) => {
+                            const current: string[] = Array.isArray(config.response_modalities)
+                                ? config.response_modalities
+                                : ['audio', 'text'];
+                            const checked = current.includes(modality);
+                            return (
+                                <label key={modality} className="inline-flex items-center gap-2 text-sm">
+                                    <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={(e) => {
+                                            const next = e.target.checked
+                                                ? Array.from(new Set([...current, modality]))
+                                                : current.filter((m) => m !== modality);
+                                            handleChange('response_modalities', next);
+                                        }}
+                                    />
+                                    {modality}
+                                </label>
+                            );
+                        })}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                        Keep both checked for a voice agent (xAI emits transcripts alongside audio chunks).
+                        Uncheck <code>audio</code> for text-only research/testing.
+                    </p>
                 </div>
             </div>
 

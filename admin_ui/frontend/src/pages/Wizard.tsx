@@ -23,6 +23,7 @@ interface SetupConfig {
     elevenlabs_agent_id?: string;
     cartesia_key?: string;
     camb_key?: string;
+    xai_key?: string;
     greeting: string;
     ai_name: string;
     ai_role: string;
@@ -132,6 +133,7 @@ const Wizard = () => {
             'local_hybrid',
             'local',
             'elevenlabs_agent',
+            'grok',
         ]);
         return supported.has(provider) ? provider : 'openai_realtime';
     };
@@ -888,6 +890,10 @@ exten => s,1,NoOp(AI Agent Call)
                     return;
                 }
             }
+            if (config.provider === 'grok' && !config.xai_key) {
+                showToast('xAI API key is required for Grok Voice Agent.', 'error');
+                return;
+            }
         }
 
         if (step === 3) {
@@ -1022,6 +1028,17 @@ exten => s,1,NoOp(AI Agent Call)
                         api_key: config.openai_key
                     });
                     if (!oaRes.data.valid) throw new Error(`OpenAI Key Invalid: ${oaRes.data.error}`);
+                }
+
+                if (config.provider === 'grok') {
+                    if (!config.xai_key) {
+                        throw new Error('xAI API Key is required for Grok Voice Agent');
+                    }
+                    const res = await axios.post('/api/wizard/validate-key', {
+                        provider: 'grok',
+                        api_key: config.xai_key
+                    });
+                    if (!res.data.valid) throw new Error(`xAI Key Invalid: ${res.data.error}`);
                 }
 
                 // Only verify Local AI health for local_hybrid on step 3
@@ -1221,6 +1238,12 @@ exten => s,1,NoOp(AI Agent Call)
                                 id="elevenlabs_agent"
                                 title="ElevenLabs Conversational"
                                 description="High-quality voices with pre-configured agent. Configure voice, prompt, and tools in ElevenLabs dashboard."
+                                icon={Cloud}
+                            />
+                            <ProviderCard
+                                id="grok"
+                                title="xAI Grok Voice Agent"
+                                description="Multilingual realtime (24+ languages including Hindi, Urdu, Arabic). $3/hr flat. μ-law direct telephony path; OpenAI-Realtime-compatible API."
                                 icon={Cloud}
                             />
                             <ProviderCard
@@ -1848,6 +1871,53 @@ exten => s,1,NoOp(AI Agent Call)
                                         <li>Create an agent at elevenlabs.io/app/agents</li>
                                         <li>Enable "Require authentication" in security settings</li>
                                         <li>Add client tools (hangup_call, blind_transfer, etc.)</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        )}
+
+                        {config.provider === 'grok' && (
+                            <div className="space-y-4">
+                                <div className="bg-blue-50/50 dark:bg-blue-900/10 p-4 rounded-md border border-blue-100 dark:border-blue-900/20 text-sm text-blue-800 dark:text-blue-300">
+                                    <p className="font-semibold mb-1">xAI Grok Voice Agent</p>
+                                    <p className="text-blue-700 dark:text-blue-400">
+                                        Realtime speech-to-speech with multilingual support (24+ languages). Wire-compatible with the
+                                        OpenAI Realtime API. Requires an xAI API key plus credits/license on the team account.
+                                    </p>
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium">xAI API Key</label>
+                                    <div className="flex space-x-2">
+                                        <input
+                                            type="password"
+                                            className="w-full p-2 rounded-md border border-input bg-background"
+                                            value={config.xai_key || ''}
+                                            onChange={e => setConfig({ ...config, xai_key: e.target.value })}
+                                            placeholder="xai-..."
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => handleTestKey('grok', config.xai_key || '')}
+                                            className="px-3 py-2 rounded-md bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                                            disabled={loading}
+                                        >
+                                            Test
+                                        </button>
+                                    </div>
+                                    <p className="text-xs text-muted-foreground">
+                                        Get a key at{' '}
+                                        <a href="https://console.x.ai/team/default/api-keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                            console.x.ai
+                                        </a>
+                                        . Defaults to voice <code>eve</code>, model <code>grok-voice-latest</code>. Tune both on the Providers page after setup.
+                                    </p>
+                                </div>
+                                <div className="bg-amber-50/50 dark:bg-amber-900/10 p-4 rounded-md border border-amber-100 dark:border-amber-900/20">
+                                    <h4 className="font-semibold mb-2 text-amber-800 dark:text-amber-300 text-sm">Notes</h4>
+                                    <ul className="text-xs text-amber-700 dark:text-amber-400 space-y-1 list-disc list-inside">
+                                        <li>xAI documents a 30-minute hard session cap. We log a warning at 28 min.</li>
+                                        <li>Cost: $3/hour flat (≈ $0.05/min), regardless of voice or model.</li>
+                                        <li>Output is PCM16 @ 24 kHz (xAI emits this regardless of session.update declaration).</li>
                                     </ul>
                                 </div>
                             </div>
