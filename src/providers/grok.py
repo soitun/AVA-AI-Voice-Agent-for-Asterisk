@@ -1999,23 +1999,15 @@ class GrokProvider(AIProviderInterface):
                     await self._cancel_response(self._current_response_id)
                     await self._emit_provider_barge_in(event_type=event_type)
             else:
-                # No active xAI response in flight. Previous turn's response.done already fired;
-                # the audio in motion is purely buffered locally. xAI delivers TTS in bursts
-                # (pattern_type=bursty cached), so _outbuf can hold 5-10 sec of unplayed audio.
-                #
-                # Three behaviors observed on live voiprnd calls (call_id RCAs in archived/logs/):
-                #
-                # (a) Original: clear _outbuf + emit ProviderBargeIn → engine flushed downstream
-                #     streaming queue too → abrupt mid-word cut. Frustrating on speakerphone.
-                #     (call 1779493977.755)
-                # (b) Over-corrected: keep _outbuf + no ProviderBargeIn → full 5-10 sec burst
-                #     drained even after user spoke → couldn't get a word in edgewise.
-                #     (call 1779495102.759)
-                # (c) This: clear _outbuf (drops the unsent provider-side burst) but DO NOT emit
-                #     ProviderBargeIn (engine keeps its small ~200 ms downstream buffer draining
-                #     naturally). Caller hears the current word/syllable finish (~200 ms tail),
-                #     then silence → next turn. Smooth without being slow.
+                # IMPORTANT: even when there's no cancellable response (e.g., output buffered locally),
+                # we still want the platform to flush local playback immediately on speech_started.
+                # This mirrors openai_realtime.py's behavior exactly — battle-tested in production
+                # across OpenAI Realtime, and Grok is wire-compatible with that. Earlier attempts
+                # at softer barge-in (keep tail / drop only provider burst) felt sluggish on
+                # speakerphone — caller couldn't get a word in. The full flush is the right
+                # interaction model for telephony.
                 if event_type == "input_audio_buffer.speech_started":
+                    # Never interrupt the greeting turn via platform flush.
                     if self._greeting_response_id and not self._greeting_completed:
                         logger.info(
                             "🛡️  Barge-in blocked - protecting greeting response",
@@ -2023,23 +2015,25 @@ class GrokProvider(AIProviderInterface):
                             response_id=self._greeting_response_id,
                         )
                     else:
-                        # Drop unsent provider-side burst, keep already-delivered downstream tail.
-                        outbuf_len_pre = len(self._outbuf)
+                        # AudioSocket+streaming: a response can be "done" at the provider while
+                        # we're still draining buffered audio locally (pacer/outbuf).
+                        # If the caller starts speaking, we must stop emitting any remaining
+                        # buffered audio immediately so the next turn can proceed normally.
                         try:
                             async with self._pacer_lock:
                                 self._outbuf.clear()
                         except Exception:
-                            logger.debug(
-                                "Failed to clear Grok egress buffer on barge-in",
-                                call_id=self._call_id,
-                                exc_info=True,
-                            )
+                            logger.debug("Failed to clear Grok egress buffer on barge-in", call_id=self._call_id, exc_info=True)
+                        try:
+                            await self._emit_audio_done()
+                        except Exception:
+                            logger.debug("Failed to stop Grok egress pacer on barge-in", call_id=self._call_id, exc_info=True)
                         logger.info(
-                            "🎤 User speech started (no active response); dropped provider burst, downstream tail draining",
+                            "🎤 User speech started (no active response); requesting platform flush",
                             call_id=self._call_id,
                             event_type=event_type,
-                            dropped_provider_bytes=outbuf_len_pre,
                         )
+                        await self._emit_provider_barge_in(event_type=event_type)
                 else:
                     logger.info("Grok input_audio_buffer ack", call_id=self._call_id, event_type=event_type)
             return
