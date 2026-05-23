@@ -122,6 +122,11 @@ class GrokProvider(AIProviderInterface):
         self._hangup_after_response: bool = False  # Flag to trigger hangup after next response
         self._farewell_timeout_task: Optional[asyncio.Task] = None  # Timeout fallback for hangup
         self._greeting_vad_task: Optional[asyncio.Task] = None
+        # End-of-call fallback: track last user transcript so we can detect
+        # "user said goodbye + assistant said goodbye but didn't invoke hangup_call"
+        # and arm session.cleanup_after_tts to hangup once audio finishes.
+        self._last_final_user_text: str = ""
+        self._hangup_fallback_armed: bool = False
         self._background_tasks: set[asyncio.Task] = set()
         self._in_audio_burst: bool = False
         # Track whether ANY audio was emitted during a given response (response_id -> bool).
@@ -1917,6 +1922,8 @@ class GrokProvider(AIProviderInterface):
                 await self._emit_transcript(transcript, is_final=True)
                 # Track user conversation for email tools and call history
                 await self._track_conversation("user", transcript)
+                # Remember most recent user turn for end-of-call fallback (see _track_conversation).
+                self._last_final_user_text = transcript
             return
         
         if event_type == "conversation.item.input_audio_transcription.failed":
@@ -1992,22 +1999,22 @@ class GrokProvider(AIProviderInterface):
                     await self._cancel_response(self._current_response_id)
                     await self._emit_provider_barge_in(event_type=event_type)
             else:
-                # No active response in flight. xAI's response.done already fired for the previous
-                # turn; the only audio still in motion is what's queued locally in the pacer + engine
-                # streaming layer. xAI delivers TTS in bursts (pattern_type=bursty), so the buffered
-                # tail can be 1-5 seconds of unplayed but already-paid-for agent speech.
+                # No active xAI response in flight. Previous turn's response.done already fired;
+                # the audio in motion is purely buffered locally. xAI delivers TTS in bursts
+                # (pattern_type=bursty cached), so _outbuf can hold 5-10 sec of unplayed audio.
                 #
-                # Old behavior: flush _outbuf + emit ProviderBargeIn → engine cleared the streaming
-                # queue → caller heard the agent cut off mid-sentence the moment they spoke.
-                # Observed on call 1779493977.755 (2026-05-22 RCA): callers on speakerphone perceived
-                # every agent turn as truncated.
+                # Three behaviors observed on live voiprnd calls (call_id RCAs in archived/logs/):
                 #
-                # New behavior: DO NOT flush local egress when there's no active xAI response. Let
-                # the pacer drain naturally; the caller hears the agent finish its sentence even
-                # while they start speaking. Mic stays live, xAI's server VAD already captured the
-                # caller's speech_started, the next turn will queue cleanly behind the tail. If this
-                # causes overlap on speakerphone, callers can interrupt explicitly with "stop" or by
-                # talking over for >1s (server VAD then commits and new response.create supersedes).
+                # (a) Original: clear _outbuf + emit ProviderBargeIn → engine flushed downstream
+                #     streaming queue too → abrupt mid-word cut. Frustrating on speakerphone.
+                #     (call 1779493977.755)
+                # (b) Over-corrected: keep _outbuf + no ProviderBargeIn → full 5-10 sec burst
+                #     drained even after user spoke → couldn't get a word in edgewise.
+                #     (call 1779495102.759)
+                # (c) This: clear _outbuf (drops the unsent provider-side burst) but DO NOT emit
+                #     ProviderBargeIn (engine keeps its small ~200 ms downstream buffer draining
+                #     naturally). Caller hears the current word/syllable finish (~200 ms tail),
+                #     then silence → next turn. Smooth without being slow.
                 if event_type == "input_audio_buffer.speech_started":
                     if self._greeting_response_id and not self._greeting_completed:
                         logger.info(
@@ -2016,11 +2023,22 @@ class GrokProvider(AIProviderInterface):
                             response_id=self._greeting_response_id,
                         )
                     else:
+                        # Drop unsent provider-side burst, keep already-delivered downstream tail.
+                        outbuf_len_pre = len(self._outbuf)
+                        try:
+                            async with self._pacer_lock:
+                                self._outbuf.clear()
+                        except Exception:
+                            logger.debug(
+                                "Failed to clear Grok egress buffer on barge-in",
+                                call_id=self._call_id,
+                                exc_info=True,
+                            )
                         logger.info(
-                            "🎤 User speech started (no active response); letting buffered tail drain",
+                            "🎤 User speech started (no active response); dropped provider burst, downstream tail draining",
                             call_id=self._call_id,
                             event_type=event_type,
-                            buffered_bytes=len(self._outbuf),
+                            dropped_provider_bytes=outbuf_len_pre,
                         )
                 else:
                     logger.info("Grok input_audio_buffer ack", call_id=self._call_id, event_type=event_type)
@@ -2433,18 +2451,57 @@ class GrokProvider(AIProviderInterface):
                     text_preview=text[:50] + "..." if len(text) > 50 else text
                 )
                 
-                # Fallback detection: Warn if AI naturally ends conversation without using hangup_call
-                if role == "assistant" and not self._hangup_after_response:
-                    text_lower = text.lower()
-                    ending_phrases = [
-                        "goodbye", "bye", "see you", "talk to you later", "take care",
-                        "have a great day", "have a good day", "have a nice day"
-                    ]
-                    if any(phrase in text_lower for phrase in ending_phrases):
+                # End-of-call fallback: if Grok speaks a clear farewell but never invokes the
+                # hangup_call tool (observed pattern on call 1779495102.759: model said goodbye
+                # three times in a row without ever calling the tool), arm cleanup_after_tts on
+                # the session so the engine hangs up cleanly once the audio finishes playing.
+                # Requires BOTH user AND assistant to signal end-of-call to avoid premature hangup
+                # mid-conversation. Mirrors the pattern in google_live._maybe_arm_cleanup_after_tts.
+                if (
+                    role == "assistant"
+                    and not self._hangup_after_response
+                    and not self._hangup_fallback_armed
+                ):
+                    assistant_lower = (text or "").lower()
+                    user_lower = (self._last_final_user_text or "").lower()
+                    assistant_farewell = any(
+                        phrase in assistant_lower for phrase in (
+                            "goodbye", "good bye", "have a great day", "have a good day",
+                            "have a nice day", "take care", "talk to you later", "see you",
+                            "the call will end", "i'll hang up", "ill hang up", "ending the call",
+                        )
+                    )
+                    user_farewell = any(
+                        phrase in user_lower for phrase in (
+                            "goodbye", "good bye", "bye", "thank you. goodbye", "thanks goodbye",
+                            "that's all", "thats all", "hang up", "end the call", "end call",
+                            "no thank you", "no thanks",
+                        )
+                    )
+                    if assistant_farewell and user_farewell:
+                        try:
+                            session.cleanup_after_tts = True
+                            await self._session_store.upsert_call(session)
+                            self._hangup_fallback_armed = True
+                            logger.info(
+                                "🔚 Armed cleanup_after_tts (assistant + user farewell, no hangup_call tool)",
+                                call_id=self._call_id,
+                                user_hint=self._last_final_user_text[:80],
+                                assistant_hint=text[:80],
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to arm cleanup_after_tts fallback",
+                                call_id=self._call_id,
+                                exc_info=True,
+                            )
+                    elif assistant_farewell:
+                        # Just log the mismatch; don't arm hangup if user didn't signal end.
                         logger.warning(
-                            "⚠️  AI used farewell phrase without invoking hangup_call tool",
+                            "⚠️  AI used farewell phrase without invoking hangup_call tool (user end-intent not detected)",
                             call_id=self._call_id,
-                            text_preview=text[:100]
+                            text_preview=text[:100],
+                            last_user=self._last_final_user_text[:80],
                         )
             else:
                 logger.warning(
