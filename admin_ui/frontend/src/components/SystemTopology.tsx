@@ -492,8 +492,85 @@ export const SystemTopology = () => {
       }
     >
       <div>
-        {/* Grid Layout for proper alignment */}
-        <div className="relative grid grid-cols-[160px_48px_160px_48px_200px] gap-y-4 justify-center items-center py-4">
+        {/* === SUMMARY STRIP === */}
+        {/* Compact at-a-glance health row: one line tells operators if anything
+            is wrong, without scanning the architecture diagram. */}
+        {(() => {
+          const totalProviders = state.configuredProviders.length;
+          const readyProviders = state.configuredProviders.filter(
+            p => state.providerReady[p.name] === 'ready'
+          ).length;
+          const totalModels = 3; // STT + LLM + TTS
+          const loadedModels = [
+            state.localAIModels?.stt?.loaded,
+            state.localAIModels?.llm?.loaded,
+            state.localAIModels?.tts?.loaded,
+          ].filter(Boolean).length;
+          const allKnown =
+            state.aiEngineStatus !== 'unknown'
+            && state.localAIStatus !== 'unknown'
+            && state.ariConnected !== null;
+          const anyError =
+            state.aiEngineStatus === 'error'
+            || state.localAIStatus === 'error'
+            || state.ariConnected === false;
+          const overallStatus: 'healthy' | 'issue' | 'checking' =
+            !allKnown ? 'checking' : anyError ? 'issue' : 'healthy';
+          const statusColor = overallStatus === 'healthy'
+            ? 'text-green-500'
+            : overallStatus === 'issue'
+              ? 'text-red-500'
+              : 'text-muted-foreground';
+          const statusLabel = overallStatus === 'healthy'
+            ? 'All systems healthy'
+            : overallStatus === 'issue'
+              ? 'Issue detected'
+              : 'Checking…';
+          return (
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 px-4 py-2.5 mb-3 rounded-lg bg-muted/30 border border-border/50 text-xs">
+              <div className={`flex items-center gap-1.5 font-medium ${statusColor}`}>
+                {overallStatus === 'healthy' ? (
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                ) : overallStatus === 'issue' ? (
+                  <XCircle className="w-3.5 h-3.5" />
+                ) : (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                )}
+                <span>{statusLabel}</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-muted-foreground">
+                <Phone className={`w-3.5 h-3.5 ${hasActiveCalls ? 'text-green-500' : ''}`} />
+                <span>
+                  <span className={hasActiveCalls ? 'text-green-500 font-medium' : 'text-foreground'}>
+                    {totalActiveCalls}
+                  </span>
+                  {' '}call{totalActiveCalls !== 1 ? 's' : ''}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 text-muted-foreground">
+                <Zap className="w-3.5 h-3.5" />
+                <span>
+                  <span className="text-foreground font-medium">{readyProviders}</span>
+                  /{totalProviders} providers ready
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 text-muted-foreground">
+                <Server className="w-3.5 h-3.5" />
+                <span>
+                  <span className="text-foreground font-medium">{loadedModels}</span>
+                  /{totalModels} local models loaded
+                </span>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Grid Layout — col 5 (providers/models) now flex-grows so it can
+            absorb the canvas width that used to be wasted to the left of
+            Asterisk. Cols 1-4 stay fixed-width so the SVG arrow geometry
+            (which references x=80 for col 1 center, x=288 for col 3 center)
+            stays exactly aligned with the actual columns. */}
+        <div className="relative grid grid-cols-[160px_48px_160px_48px_minmax(420px,1fr)] gap-y-4 items-center py-4">
 
           {/* === ROW 1: Asterisk → AI Engine → Providers === */}
 
@@ -619,9 +696,12 @@ export const SystemTopology = () => {
                 className="inline-block px-3 py-1 mx-auto rounded-full bg-muted/40 border border-border/50 text-[10px] text-muted-foreground uppercase tracking-wider mb-3 text-center cursor-pointer hover:text-primary transition-colors"
               >Providers</div>
             </div>
-            <div className="flex flex-col gap-2">
+            {/* Responsive provider grid: 1 col on narrow, 2 on tablet, 3 on
+                desktop. Used to be a single column = ~540px of vertical scroll
+                for 6 kinds; now ~180px in 2 rows of 3 on a desktop viewport. */}
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
               {providerGroups.length === 0 ? (
-                <div className="p-3 rounded-lg border border-dashed border-border text-xs text-muted-foreground text-center">
+                <div className="col-span-full p-3 rounded-lg border border-dashed border-border text-xs text-muted-foreground text-center">
                   No agents
                 </div>
               ) : (
@@ -734,15 +814,20 @@ export const SystemTopology = () => {
 
           {/* === ROW 2: SVG-based T-junction from AI Engine === */}
 
-          {/* Full width SVG spanning columns 1-5 for precise arrow drawing */}
-          <div className="col-span-5 h-14 relative">
+          {/* SVG spans only cols 1-4 (fixed widths summing to 416px). All
+              T-junction paths reference x=80 (col 1 center) and x=288 (col 3
+              center) — both within the 416 unit viewBox. Constraining the
+              SVG to cols 1-4 means the arrow heads keep landing exactly on
+              col-3 center (Local AI top) and col-1 center (Pipelines top)
+              regardless of how wide col 5 grows. */}
+          <div className="col-span-4 h-14 relative">
             <svg
               className="absolute inset-0 w-full h-full"
-              viewBox="0 0 616 56"
+              viewBox="0 0 416 56"
               preserveAspectRatio="xMidYMid meet"
             >
-              {/* Grid columns: 160 + 48 + 160 + 48 + 200 = 616 total */}
-              {/* Col 1 center: 80, Col 3 center: 160+48+80 = 288 */}
+              {/* Cols 1-4 widths: 160 + 48 + 160 + 48 = 416 total. */}
+              {/* Col 1 center: 80, Col 3 center: 160+48+80 = 288. */}
 
               {/* Center bezier path from AI Engine to Local AI using smooth corners */}
               <path
@@ -773,6 +858,12 @@ export const SystemTopology = () => {
               />
             </svg>
           </div>
+
+          {/* CRITICAL — explicit empty placeholder for row 2, col 5.
+              Without this, CSS Grid's auto-placement sees the open slot and
+              shoves the next item (Pipelines) into it, breaking the layout.
+              Discovered the hard way in commit b0267916 (reverted). */}
+          <div aria-hidden="true" />
 
           {/* === ROW 3: Pipelines ← Local AI Server → Models === */}
 
@@ -929,7 +1020,10 @@ export const SystemTopology = () => {
                 className="inline-block px-3 py-1 mx-auto rounded-full bg-muted/40 border border-border/50 text-[10px] text-muted-foreground uppercase tracking-wider mb-3 text-center cursor-pointer hover:text-primary transition-colors"
               >Models</div>
             </div>
-            <div className="flex flex-col gap-2">
+            {/* Models row uses the same flex-grow col 5 width as the
+                providers grid above. With STT/LLM/TTS sitting side-by-side
+                the section is ~80px tall instead of ~210px. */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               {/* STT */}
               <div onClick={() => navigate('/models')} title="Go to Models →" className={`relative flex items-center gap-2 p-2 px-3 rounded-xl border backdrop-blur-sm transition-all duration-300 cursor-pointer hover:-translate-y-[1px] ${activeLocalModels.stt && state.localAIModels?.stt?.loaded
                 ? 'border-green-500/50 bg-green-500/10 shadow-[0_4px_15px_rgb(34,197,94,0.1)] ring-1 ring-green-500/30'
