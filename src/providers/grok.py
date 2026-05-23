@@ -1992,10 +1992,23 @@ class GrokProvider(AIProviderInterface):
                     await self._cancel_response(self._current_response_id)
                     await self._emit_provider_barge_in(event_type=event_type)
             else:
-                # IMPORTANT: even when there's no cancellable response (e.g., output buffered locally),
-                # we still want the platform to flush local playback immediately on speech_started.
+                # No active response in flight. xAI's response.done already fired for the previous
+                # turn; the only audio still in motion is what's queued locally in the pacer + engine
+                # streaming layer. xAI delivers TTS in bursts (pattern_type=bursty), so the buffered
+                # tail can be 1-5 seconds of unplayed but already-paid-for agent speech.
+                #
+                # Old behavior: flush _outbuf + emit ProviderBargeIn → engine cleared the streaming
+                # queue → caller heard the agent cut off mid-sentence the moment they spoke.
+                # Observed on call 1779493977.755 (2026-05-22 RCA): callers on speakerphone perceived
+                # every agent turn as truncated.
+                #
+                # New behavior: DO NOT flush local egress when there's no active xAI response. Let
+                # the pacer drain naturally; the caller hears the agent finish its sentence even
+                # while they start speaking. Mic stays live, xAI's server VAD already captured the
+                # caller's speech_started, the next turn will queue cleanly behind the tail. If this
+                # causes overlap on speakerphone, callers can interrupt explicitly with "stop" or by
+                # talking over for >1s (server VAD then commits and new response.create supersedes).
                 if event_type == "input_audio_buffer.speech_started":
-                    # Never interrupt the greeting turn via platform flush.
                     if self._greeting_response_id and not self._greeting_completed:
                         logger.info(
                             "🛡️  Barge-in blocked - protecting greeting response",
@@ -2003,25 +2016,12 @@ class GrokProvider(AIProviderInterface):
                             response_id=self._greeting_response_id,
                         )
                     else:
-                        # AudioSocket+streaming: a response can be "done" at the provider while
-                        # we're still draining buffered audio locally (pacer/outbuf).
-                        # If the caller starts speaking, we must stop emitting any remaining buffered
-                        # audio immediately so the next turn can proceed normally.
-                        try:
-                            async with self._pacer_lock:
-                                self._outbuf.clear()
-                        except Exception:
-                            logger.debug("Failed to clear Grok egress buffer on barge-in", call_id=self._call_id, exc_info=True)
-                        try:
-                            await self._emit_audio_done()
-                        except Exception:
-                            logger.debug("Failed to stop Grok egress pacer on barge-in", call_id=self._call_id, exc_info=True)
                         logger.info(
-                            "🎤 User speech started (no active response); requesting platform flush",
+                            "🎤 User speech started (no active response); letting buffered tail drain",
                             call_id=self._call_id,
                             event_type=event_type,
+                            buffered_bytes=len(self._outbuf),
                         )
-                        await self._emit_provider_barge_in(event_type=event_type)
                 else:
                     logger.info("Grok input_audio_buffer ack", call_id=self._call_id, event_type=event_type)
             return
