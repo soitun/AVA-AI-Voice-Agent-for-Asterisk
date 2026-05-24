@@ -1157,7 +1157,22 @@ const ProvidersPage: React.FC = () => {
                     <div className="rounded-lg border border-border bg-card/40 p-4 space-y-3">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Provider Key</label>
+                                <div className="flex items-center gap-1.5">
+                                    <label className="text-sm font-medium">Provider Key</label>
+                                    <HelpTooltip
+                                        content={
+                                            <>
+                                                <strong>Provider Key</strong> — the unique YAML identifier for this provider instance.
+                                                <ul className="list-disc pl-4 mt-1 space-y-0.5">
+                                                    <li>Lowercase, digits, <code>_</code>, <code>-</code>, <code>.</code> only — no spaces</li>
+                                                    <li>Used in the dialplan to route calls: <code>Set(AI_PROVIDER=&lt;key&gt;)</code></li>
+                                                    <li><strong>Immutable</strong> after creation — clone to rename</li>
+                                                    <li>For multi-tenant, prefix with the tenant: <code>acme_grok</code>, <code>globex_grok</code></li>
+                                                </ul>
+                                            </>
+                                        }
+                                    />
+                                </div>
                                 <input
                                     className="w-full p-2 rounded border border-input bg-background"
                                     value={providerForm.name || ''}
@@ -1168,7 +1183,22 @@ const ProvidersPage: React.FC = () => {
                             </div>
                             {isFullAgentProvider(providerForm) && (
                                 <div className="space-y-2">
-                                    <label className="text-sm font-medium">Provider Type</label>
+                                    <div className="flex items-center gap-1.5">
+                                        <label className="text-sm font-medium">Provider Type</label>
+                                        <HelpTooltip
+                                            content={
+                                                <>
+                                                    <strong>Provider Type</strong> — which engine adapter handles calls for this instance.
+                                                    <ul className="list-disc pl-4 mt-1 space-y-0.5">
+                                                        <li>Determines which form fields appear below (different providers expose different settings)</li>
+                                                        <li><strong>Immutable</strong> after creation</li>
+                                                        <li>Each type's defaults populate from the Templates modal</li>
+                                                        <li><code>local</code> = full-agent mode for the on-premises Local AI Server</li>
+                                                    </ul>
+                                                </>
+                                            }
+                                        />
+                                    </div>
                                     <select
                                         className="w-full p-2 rounded border border-input bg-background"
                                         value={providerForm.type || 'openai_realtime'}
@@ -1185,7 +1215,21 @@ const ProvidersPage: React.FC = () => {
                                 </div>
                             )}
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Display Name</label>
+                                <div className="flex items-center gap-1.5">
+                                    <label className="text-sm font-medium">Display Name</label>
+                                    <HelpTooltip
+                                        content={
+                                            <>
+                                                <strong>Display Name</strong> — friendly label shown in the dashboard topology and Providers list.
+                                                <ul className="list-disc pl-4 mt-1 space-y-0.5">
+                                                    <li>Falls back to the YAML key when blank</li>
+                                                    <li>Use the customer / tenant name for clarity in multi-instance setups (e.g. "Acme Google Live")</li>
+                                                    <li>Doesn't affect routing — pure cosmetic</li>
+                                                </ul>
+                                            </>
+                                        }
+                                    />
+                                </div>
                                 <input
                                     className="w-full p-2 rounded border border-input bg-background"
                                     value={providerForm.display_name || ''}
@@ -1194,7 +1238,21 @@ const ProvidersPage: React.FC = () => {
                                 />
                             </div>
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Customer</label>
+                                <div className="flex items-center gap-1.5">
+                                    <label className="text-sm font-medium">Customer</label>
+                                    <HelpTooltip
+                                        content={
+                                            <>
+                                                <strong>Customer</strong> — optional tenant identifier for multi-instance deployments.
+                                                <ul className="list-disc pl-4 mt-1 space-y-0.5">
+                                                    <li>Shown in the dashboard sub-row to distinguish instances of the same provider kind</li>
+                                                    <li>Helps you tell apart e.g. <code>acme_grok</code> from <code>globex_grok</code> at a glance</li>
+                                                    <li>Doesn't affect routing or billing — purely a label</li>
+                                                </ul>
+                                            </>
+                                        }
+                                    />
+                                </div>
                                 <input
                                     className="w-full p-2 rounded border border-input bg-background"
                                     value={providerForm.customer || ''}
@@ -1209,7 +1267,24 @@ const ProvidersPage: React.FC = () => {
                         <div className="rounded-lg border border-border bg-card/40 p-4 space-y-3">
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div className="space-y-2">
-                                    <label className="text-sm font-medium">Capability (required)</label>
+                                    <div className="flex items-center gap-1.5">
+                                        <label className="text-sm font-medium">Capability (required)</label>
+                                        <HelpTooltip
+                                            content={
+                                                <>
+                                                    <strong>Capability</strong> — which pipeline slot this modular provider fills.
+                                                    <ul className="list-disc pl-4 mt-1 space-y-0.5">
+                                                        <li><code>STT</code> — Speech-to-Text (transcription)</li>
+                                                        <li><code>LLM</code> — Large Language Model (reasoning)</li>
+                                                        <li><code>TTS</code> — Text-to-Speech (synthesis)</li>
+                                                        <li>Pipelines reference providers by capability — only one per provider</li>
+                                                        <li>The YAML key gets auto-suffixed (e.g. <code>_stt</code>) for clarity</li>
+                                                        <li><strong>Immutable</strong> after first save</li>
+                                                    </ul>
+                                                </>
+                                            }
+                                        />
+                                    </div>
                                     <select
                                         className="w-full p-2 rounded border border-input bg-background"
                                         value={Array.isArray(providerForm.capabilities) && providerForm.capabilities.length === 1 ? providerForm.capabilities[0] : ''}
