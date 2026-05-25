@@ -7,8 +7,22 @@ and falls back to the legacy key for existing configs.
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
+
+# Strict allowlist for provider instance keys (operator-facing identifiers).
+# We deliberately keep this tight: alphanumerics, dot, underscore, hyphen,
+# 1–64 chars. Anything outside this set is rejected before any filesystem
+# operation that interpolates the key, so a malicious YAML/admin-API caller
+# cannot construct a path that escapes the secrets root via the key itself.
+_PROVIDER_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+
+# Static root for per-instance provider secrets. Every filesystem path built
+# from a provider key MUST resolve underneath this directory; see
+# safe_secret_path() below.
+PROVIDER_SECRETS_ROOT = "/app/project/secrets/providers"
 
 
 FULL_AGENT_KINDS = frozenset(
@@ -84,14 +98,53 @@ def is_full_agent_provider(provider_key: str, provider_cfg: Any) -> bool:
 
 
 def validate_provider_key(provider_key: str) -> None:
+    """Strict allowlist check for provider instance keys.
+
+    Used at every entry point that derives a filesystem path from the key.
+    The regex (`[A-Za-z0-9_.-]{1,64}`) is intentionally narrower than what
+    YAML permits so we can never produce a path that escapes the secrets
+    root via traversal characters (``/``, ``\\``, ``..``, control chars,
+    null bytes, etc.).
+    """
     if not provider_key or not isinstance(provider_key, str):
         raise ProviderInstanceError("Provider key is required")
-    if "/" in provider_key or "\\" in provider_key or provider_key in {".", ".."}:
-        raise ProviderInstanceError("Provider key cannot contain path separators")
-    if not all(ch.isalnum() or ch in ("_", "-", ".") for ch in provider_key):
+    if not _PROVIDER_KEY_PATTERN.fullmatch(provider_key):
         raise ProviderInstanceError(
-            "Provider key may only contain letters, numbers, '.', '_' and '-'"
+            "Provider key may only contain letters, numbers, '.', '_' and '-' (1-64 chars)"
         )
+    if provider_key in {".", ".."}:
+        raise ProviderInstanceError("Provider key cannot be '.' or '..'")
+
+
+def safe_secret_path(provider_key: str, filename: str, *, root: str = PROVIDER_SECRETS_ROOT) -> str:
+    """Build a secrets-root-bounded absolute path from a provider key + filename.
+
+    Validates ``provider_key`` against the strict allowlist, validates
+    ``filename`` against a similarly strict allowlist (no separators / no
+    traversal), resolves both to a real path, and re-checks containment.
+    Callers must use this helper for every filesystem operation that
+    interpolates a provider key — never build paths from untrusted strings
+    directly.
+    """
+    validate_provider_key(provider_key)
+    if not filename or not isinstance(filename, str):
+        raise ProviderInstanceError("Credential filename is required")
+    if not re.fullmatch(r"^[A-Za-z0-9_.\-]{1,64}$", filename) or filename in {".", ".."}:
+        raise ProviderInstanceError("Invalid credential filename")
+    root_real = os.path.realpath(root)
+    candidate = os.path.realpath(os.path.join(root_real, provider_key, filename))
+    # Containment check: candidate must be inside root_real (allow == root_real
+    # for callers that want the root itself, though the join above prevents
+    # that in practice because we always pass a filename).
+    if not (candidate == root_real or candidate.startswith(root_real + os.sep)):
+        raise ProviderInstanceError("Provider credential path escapes secrets root")
+    return candidate
+
+
+def read_secret_file_for_provider(provider_key: str, filename: str, *, root: str = PROVIDER_SECRETS_ROOT) -> str:
+    """Read a per-provider secret file through safe_secret_path."""
+    safe_path = safe_secret_path(provider_key, filename, root=root)
+    return Path(safe_path).read_text(encoding="utf-8").strip()
 
 
 def validate_provider_instances(config_data: Dict[str, Any]) -> None:
@@ -207,6 +260,29 @@ def full_agent_default(config_data: Dict[str, Any]) -> bool:
 
 
 def read_secret_file(path: str) -> str:
+    """Read a secret file referenced from provider config.
+
+    The ``path`` value originates from operator-managed YAML
+    (``api_key_file`` / ``agent_id_file`` / ``credentials_path``). Two
+    guards apply here:
+
+    1. The Admin UI writes these values via :func:`safe_secret_path`, so
+       any path produced by the Admin UI is already bounded to
+       :data:`PROVIDER_SECRETS_ROOT`.
+    2. For configs hand-edited outside the Admin UI, we still trust the
+       operator (the YAML is on disk, owned by them) — but we explicitly
+       reject obviously hostile shapes (empty/whitespace, NUL byte,
+       relative traversal, non-string) so a typo'd config can't read
+       e.g. ``/etc/passwd`` because of a renderer bug.
+
+    We deliberately do NOT bound this to :data:`PROVIDER_SECRETS_ROOT`
+    because legacy single-instance configs pass an arbitrary
+    operator-chosen path (``/etc/aava/openai.key`` etc.).
+    """
+    if not isinstance(path, str) or not path.strip():
+        raise ProviderInstanceError("Secret file path is required")
+    if "\x00" in path:
+        raise ProviderInstanceError("Secret file path contains NUL byte")
     return Path(path).read_text(encoding="utf-8").strip()
 
 

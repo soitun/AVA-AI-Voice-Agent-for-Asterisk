@@ -1,14 +1,22 @@
+import importlib.util
 import sys
 import wave
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
+# admin_ui backend imports fastapi at module load. Skip the whole module on
+# environments that don't have it (CI's `build` job runs the engine-only
+# test set without admin_ui deps).
+if importlib.util.find_spec("fastapi") is None:
+    pytest.skip("fastapi not installed; admin_ui call-recording tests skipped", allow_module_level=True)
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1] / "admin_ui" / "backend"
 sys.path.insert(0, str(BACKEND_ROOT))
 
-from api import calls
-from fastapi import Response
+from api import calls  # noqa: E402  (skip-gated import)
+from fastapi import Response  # noqa: E402  (skip-gated import)
 
 
 def test_find_recording_accepts_uppercase_wav_in_date_dir(monkeypatch, tmp_path):

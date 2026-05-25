@@ -1954,6 +1954,7 @@ def _provider_instances_module():
         ProviderInstanceError,
         provider_kind,
         resolve_secret_value,
+        safe_secret_path,
         validate_provider_key,
     )
     return {
@@ -1963,6 +1964,7 @@ def _provider_instances_module():
         "ProviderInstanceError": ProviderInstanceError,
         "provider_kind": provider_kind,
         "resolve_secret_value": resolve_secret_value,
+        "safe_secret_path": safe_secret_path,
         "validate_provider_key": validate_provider_key,
     }
 
@@ -1986,6 +1988,17 @@ def _get_provider_block(provider_key: str) -> tuple[Dict[str, Any], Dict[str, An
 
 
 def _provider_secret_path(provider_key: str, credential_name: str) -> str:
+    """Build a secrets-root-bounded path for a per-provider credential file.
+
+    Delegates to :func:`src.config.provider_instances.safe_secret_path`
+    which (a) re-validates ``provider_key`` against the strict allowlist
+    and (b) re-checks that the realpath stays inside
+    :data:`PROVIDER_SECRETS_ROOT`. CodeQL flags string interpolation of
+    request data into file paths, even when the input has already been
+    sanitized — routing every call through the central helper makes the
+    validation local to every filesystem operation and removes the
+    finding.
+    """
     filename_map = {
         "api-key": "api-key",
         "agent-id": "agent-id",
@@ -1994,12 +2007,14 @@ def _provider_secret_path(provider_key: str, credential_name: str) -> str:
     if credential_name not in filename_map:
         raise HTTPException(status_code=400, detail="credential_name must be one of: api-key, agent-id, vertex-json")
     helpers = _provider_instances_module()
-    helpers["validate_provider_key"](provider_key)
-    root = os.path.realpath(PROVIDER_SECRETS_ROOT)
-    path = os.path.realpath(os.path.join(PROVIDER_SECRETS_ROOT, provider_key, filename_map[credential_name]))
-    if not (path == root or path.startswith(root + os.sep)):
-        raise HTTPException(status_code=400, detail="Invalid provider credential path")
-    return path
+    try:
+        return helpers["safe_secret_path"](
+            provider_key,
+            filename_map[credential_name],
+            root=PROVIDER_SECRETS_ROOT,
+        )
+    except helpers["ProviderInstanceError"] as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 def _credential_allowed_for_kind(kind: str, credential_name: str) -> bool:
@@ -2014,12 +2029,44 @@ def _credential_allowed_for_kind(kind: str, credential_name: str) -> bool:
 
 
 def _write_provider_secret(path: str, content: bytes) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temp_path = f"{path}.tmp"
+    """Atomically write a per-instance provider credential to disk.
+
+    This is the canonical sink for per-tenant API keys / agent IDs /
+    Vertex JSON. Storing credentials in chmod-600 files under
+    :data:`PROVIDER_SECRETS_ROOT` is the intentional design (see
+    :doc:`docs/Multi-Instance-Full-Agent-Providers`): runtime providers
+    need to read the secret to make API calls, and the alternative
+    (env-vars only) does not scale to multi-tenant deployments.
+
+    Defense in depth here:
+
+    1. We re-bound the target path inside :data:`PROVIDER_SECRETS_ROOT`
+       even though every caller already goes through
+       :func:`_provider_secret_path` / :func:`safe_secret_path` —
+       CodeQL flags every interpolation of request-derived data into
+       file ops, and the local re-check gives the scanner a sanitizer
+       it can recognize. (Path traversal alert IDs 1704–1713.)
+    2. We write via a ``.tmp`` sibling + ``os.replace`` so we never
+       leave a partially-written secret on disk.
+    3. We chmod 0o600 before the rename so even briefly the temp file
+       is owner-only readable.
+    """
+    root_real = os.path.realpath(PROVIDER_SECRETS_ROOT)
+    target_real = os.path.realpath(path)
+    if not (target_real == root_real or target_real.startswith(root_real + os.sep)):
+        # Refuse to write outside the secrets root. Callers should have
+        # produced a safe path via _provider_secret_path; if we got here
+        # with something else, treat it as a hard bug.
+        raise HTTPException(status_code=400, detail="Refused to write secret outside provider secrets root")
+    os.makedirs(os.path.dirname(target_real), exist_ok=True)
+    temp_path = f"{target_real}.tmp"
+    # nosec: writing the credential to a chmod-600 file under the secrets
+    # root is the intended storage layer for per-instance API keys; see
+    # docstring above.
     with open(temp_path, "wb") as f:
         f.write(content)
     os.chmod(temp_path, 0o600)
-    os.replace(temp_path, path)
+    os.replace(temp_path, target_real)
 
 
 def _save_merged_config(merged_config: Dict[str, Any]) -> None:
@@ -2072,19 +2119,30 @@ def _migrate_inline_provider_secrets(config_data: Dict[str, Any]) -> bool:
 
 
 def _credential_metadata(path: str, credential_name: str) -> Dict[str, Any]:
-    if not os.path.exists(path):
-        return {"uploaded": False, "path": path}
-    stat = os.stat(path)
+    """Stat + optional JSON-parse a per-instance credential file.
+
+    Re-bound the input path to :data:`PROVIDER_SECRETS_ROOT` so the
+    filesystem operations below have a local sanitizer (CodeQL alert
+    IDs 1709–1711). Every caller already builds the path via
+    :func:`_provider_secret_path`; this is a defense-in-depth check.
+    """
+    root_real = os.path.realpath(PROVIDER_SECRETS_ROOT)
+    target_real = os.path.realpath(path)
+    if not (target_real == root_real or target_real.startswith(root_real + os.sep)):
+        return {"uploaded": False, "path": path, "error": "Path outside provider secrets root"}
+    if not os.path.exists(target_real):
+        return {"uploaded": False, "path": target_real}
+    stat = os.stat(target_real)
     meta: Dict[str, Any] = {
         "uploaded": True,
-        "path": path,
+        "path": target_real,
         "uploaded_at": stat.st_mtime,
     }
     if credential_name == "vertex-json":
         try:
             import json
 
-            with open(path, "r") as f:
+            with open(target_real, "r") as f:
                 creds = json.load(f)
             meta.update(
                 {
@@ -2202,8 +2260,15 @@ async def delete_provider_credential(provider_key: str, credential_name: str):
     providers[provider_key] = provider_cfg
     merged["providers"] = providers
     _save_merged_config(merged)
-    if os.path.exists(path):
-        os.remove(path)
+    # Re-bound the unlink target inside the secrets root before removing.
+    # `path` was produced by `_provider_secret_path` for this request, but
+    # CodeQL flags the os.remove() interpolation; the local realpath +
+    # containment check gives the scanner a sanitizer it recognizes
+    # (alert IDs 1712, 1713).
+    root_real = os.path.realpath(PROVIDER_SECRETS_ROOT)
+    target_real = os.path.realpath(path)
+    if (target_real == root_real or target_real.startswith(root_real + os.sep)) and os.path.exists(target_real):
+        os.remove(target_real)
     return {"status": "success", "restart_pending": True}
 
 
@@ -2270,8 +2335,17 @@ async def verify_provider_credentials(provider_key: str):
         if kind == "google_live":
             if not api_key:
                 raise HTTPException(status_code=400, detail="Google API key or Vertex credentials are not configured")
+            # Pass the API key via httpx `params=` rather than f-string
+            # interpolation. The hostname is hardcoded, so this isn't an
+            # SSRF risk in practice, but the f-string trips CodeQL's
+            # partial-SSRF rule (alert ID 1715) because the interpolated
+            # value crosses the URL boundary; httpx handles encoding
+            # cleanly and the request stays on the intended host.
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}")
+                resp = await client.get(
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    params={"key": api_key},
+                )
             if resp.status_code >= 400:
                 raise HTTPException(status_code=400, detail="Google API key verification failed")
             return {"status": "success", "message": "Google Developer API key verified"}
