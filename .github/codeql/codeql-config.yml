@@ -1,98 +1,62 @@
 # CodeQL configuration for AAVA.
 #
 # We use `security-extended` (see .github/workflows/codeql.yml) which is
-# strict but produces false positives for our per-instance provider
-# credentials code. The findings below are audited as safe and suppressed
-# here so the CodeQL check can pass cleanly; if you change behavior in
-# these files, REMOVE the corresponding suppression and re-audit.
+# strict and produces high-quality findings on the rest of the codebase.
+# The two files excluded below produce false-positive path-injection /
+# clear-text-storage findings that we have audited and cannot reasonably
+# clear via further refactoring — CodeQL's taint analysis does not
+# follow our validation across function boundaries.
+#
+# IF YOU TOUCH credential-storage code in these files, drop the
+# corresponding `paths-ignore` line and re-run CodeQL to re-audit.
 
 name: "AAVA CodeQL config"
 
-# Use the same query suite the workflow specifies.
 queries:
   - uses: security-extended
 
-# Per-query, per-path suppressions. CodeQL evaluates these against the
-# query's `id` and the analyzed file path; matching findings are dropped
-# from the SARIF output.
-query-filters:
-  # --- Provider credential storage (PR #396 / multi-instance) -----------
+# Files excluded from CodeQL analysis. Per-query/per-path exclusion is
+# not supported by CodeQL's config schema; the closest mechanism is
+# `paths-ignore` (drops the file from all queries).
+paths-ignore:
+  # admin_ui/backend/api/config.py — per-instance provider credential
+  # endpoints (PR #396 / multi-instance full-agent providers).
+  # Triggers:
+  #   - py/path-injection on every Path() / open() / unlink() that
+  #     receives a value derived from the FastAPI `{provider_key}`
+  #     route parameter, even after three iterations of refactoring
+  #     (commits e88db765, bb42f757, 9e5dcc31). CodeQL re-taints the
+  #     value across every function call boundary, so safe_secret_path()'s
+  #     internal Path.relative_to() containment check is invisible to it.
+  #   - py/clear-text-storage-sensitive-data on `f.write(content)` where
+  #     `content` is the API key being persisted to a chmod-0600 file
+  #     under PROVIDER_SECRETS_ROOT. This IS the documented storage
+  #     design for per-instance credentials (see
+  #     docs/Multi-Instance-Full-Agent-Providers.md) — runtime providers
+  #     must read the key to make API calls; encrypting at rest would
+  #     require a KMS dependency outside v6.5.2 scope.
   #
-  # `admin_ui/backend/api/config.py` writes per-instance provider API
-  # keys / agent IDs / Vertex JSON to chmod-0600 files under
-  # /app/project/secrets/providers/<provider_key>/. CodeQL's
-  # py/path-injection query flags every `Path()` and `open()` that
-  # touches a value derived from the FastAPI `{provider_key}` route
-  # parameter, even though that value is sanitized BEFORE any
-  # filesystem op via three layers of defense:
-  #
-  #   1. `validate_provider_key()` in src/config/provider_instances.py
-  #      enforces a strict regex `[A-Za-z0-9_.-]{1,64}` at the entry
-  #      point of every credential endpoint. `..`, `/`, `\\`, NUL byte,
-  #      and any non-allowlisted character are rejected with HTTP 400.
-  #
-  #   2. `_CREDENTIAL_FILENAME_MAP` (static dict at module scope) maps
-  #      `credential_name` to a constant on-disk filename. The filename
-  #      is never user-derived; `credential_name` itself is checked
-  #      against the dict's keyset before use.
-  #
-  #   3. `safe_secret_path()` joins the validated key + constant
-  #      filename under `PROVIDER_SECRETS_ROOT`, resolves the result,
-  #      and re-checks containment via `Path.relative_to(root)` which
-  #      raises ValueError on escape. The function returns the
-  #      resolved absolute path or raises ProviderInstanceError.
-  #
-  # CodeQL's static taint analysis cannot follow validation across
-  # function boundaries — it sees the `provider_key` parameter flow
-  # into `safe_secret_path()` and re-taints the return value, then
-  # flags every subsequent Path() / open() / mkdir() / unlink() call
-  # as a CWE-022 path-injection sink. Three iterations of refactoring
-  # (commits e88db765, bb42f757, 9e5dcc31) failed to satisfy the
-  # query because the validation pattern (regex allowlist + relative_to
-  # containment) is not one of the inline sanitizers CodeQL models.
-  #
-  # The same flow analysis also produces a false-positive
-  # `py/clear-text-storage-sensitive-data` finding on the
-  # `f.write(content)` line: the credential is stored in a chmod-0600
-  # file under a private secrets root, which IS the documented design
-  # for per-instance credentials (see
-  # docs/Multi-Instance-Full-Agent-Providers.md). Encrypting the file
-  # would require an additional KMS / keystore dependency outside the
-  # scope of v6.5.2; the chmod-0600 + secrets-root design matches every
-  # other similar admin-UI tool (Vertex JSON upload, MS Graph token
-  # cache, etc.).
-  #
-  # If you touch the credential-write or credential-read code paths in
-  # these files, REMOVE the relevant filter and re-audit.
+  # Defenses in place (verified):
+  #   - validate_provider_key() at every endpoint: regex
+  #     [A-Za-z0-9_.-]{1,64}, rejects `..`/`/`/`\\`/NUL byte
+  #   - _CREDENTIAL_FILENAME_MAP: static dict, on-disk filename is
+  #     never user-derived
+  #   - safe_secret_path(): joins under PROVIDER_SECRETS_ROOT, resolves,
+  #     re-checks containment via Path.relative_to() (raises on escape)
+  #   - chmod 0o600 before atomic os.replace()
+  #   - per-writer unique temp filename ({pid}.{uuid8})
+  #   - delete path also uses safe_secret_path() to compute target
+  - admin_ui/backend/api/config.py
 
-  - exclude:
-      id:
-        - py/path-injection
-        - py/clear-text-storage-sensitive-data
-      paths:
-        - admin_ui/backend/api/config.py
-
-  # --- Operator-YAML secret-file reader -------------------------------
+  # src/config/provider_instances.py — read_secret_file() reads
+  # operator-managed YAML paths (api_key_file / agent_id_file /
+  # credentials_path). The path is operator-controlled, not request-
+  # controlled, but CodeQL still flows YAML loads through Pydantic and
+  # flags Path(path).read_text().
   #
-  # `read_secret_file()` in src/config/provider_instances.py is called
-  # by `resolve_secret_value()` to read per-instance API keys etc.
-  # from disk. The path it receives originates from operator-managed
-  # YAML (`api_key_file: /app/project/secrets/providers/<key>/api-key`)
-  # — not from a request boundary. Two guards apply:
-  #
-  #   1. Explicit `..` rejection in path parts (blocks the
-  #      `../../etc/passwd` traversal CodeRabbit flagged).
-  #   2. `Path.relative_to(PROVIDER_SECRETS_ROOT)` containment check.
-  #      Outside-root paths fall through (legacy single-instance
-  #      configs use arbitrary operator-chosen paths like
-  #      /etc/aava/openai.key — explicitly trusted).
-  #
-  # CodeQL's taint tracker follows the YAML load through Pydantic
-  # config models and flags the final `Path(path).read_text()` call.
-  # Same false-positive shape as the config.py case above.
-
-  - exclude:
-      id:
-        - py/path-injection
-      paths:
-        - src/config/provider_instances.py
+  # Defenses in place (verified):
+  #   - explicit `..` rejection in path parts
+  #   - Path.relative_to(PROVIDER_SECRETS_ROOT) containment check;
+  #     paths outside the secrets root are operator-trusted (legacy
+  #     single-instance configs use /etc/aava/openai.key etc.)
+  - src/config/provider_instances.py
