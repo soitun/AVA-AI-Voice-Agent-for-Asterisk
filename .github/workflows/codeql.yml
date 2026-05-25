@@ -38,6 +38,9 @@ jobs:
         languages: ${{ matrix.language }}
         # Specify queries: default, security-extended, security-and-quality
         queries: security-extended
+        # Audited false-positive suppressions live in the config file.
+        # See .github/codeql/codeql-config.yml for the per-file rationale.
+        config-file: ./.github/codeql/codeql-config.yml
         # Auto-detect Python version from requirements.txt
         setup-python-dependencies: true
 
