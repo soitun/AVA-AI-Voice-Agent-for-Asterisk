@@ -980,41 +980,49 @@ class LocalProvider(AIProviderInterface, ProviderCapabilitiesMixin):
                 logger.info("✅ Reconnected to Local AI Server, restarting receive loop")
                 return True
                 
-            except ConnectionRefusedError as e:
-                logger.info(
-                    "⏭️ Local AI Server refused connection - provider will be inactive",
-                    host=self._server_host,
-                    port=self._server_port,
-                    error=str(e),
-                    note="Start local-ai-server container if you want to use local STT/TTS/LLM"
-                )
-                self._server_unavailable = True
-                return False
-            except OSError as e:
+            except (ConnectionRefusedError, OSError) as e:
+                # ConnectionRefused (incl. OSError errno 61 macOS / 111 Linux
+                # / 10061 Windows) is the normal symptom while the
+                # local-ai-server container is warming up — models can take
+                # ~2 minutes to load. Run the full backoff schedule
+                # (~157s) before giving up so calls placed during warmup
+                # don't fail fast. After all retries are exhausted we
+                # mark the server unavailable so subsequent calls don't
+                # spin reconnect attempts forever.
+                #
+                # Previously this branch returned False on the first
+                # ConnectionRefused, which made `initialize()` fail
+                # instantly during warmup and aborted calls that would
+                # have recovered by attempt 2-3 (Codex P1 on PR #396).
                 refused_errno = getattr(e, "errno", None)
-                if refused_errno in {61, 111, 10061}:
-                    logger.info(
-                        "⏭️ Local AI Server refused connection - provider will be inactive",
-                        host=self._server_host,
-                        port=self._server_port,
-                        error=str(e),
-                        note="Start local-ai-server container if you want to use local STT/TTS/LLM"
-                    )
-                    self._server_unavailable = True
-                    return False
-                
+                is_refused = isinstance(e, ConnectionRefusedError) or refused_errno in {61, 111, 10061}
+
                 if attempt < len(backoff_schedule):
-                    logger.debug(
+                    log_fn = logger.debug if is_refused else logger.debug
+                    log_fn(
                         f"Connection attempt {attempt} failed (will retry)",
                         error=type(e).__name__,
-                        next_retry=f"{delay}s"
+                        refused=is_refused,
+                        next_retry=f"{delay}s",
                     )
                 else:
+                    if is_refused:
+                        logger.info(
+                            "⏭️ Local AI Server refused connection after all retries - provider will be inactive",
+                            host=self._server_host,
+                            port=self._server_port,
+                            attempts=len(backoff_schedule),
+                            total_elapsed=f"{total_elapsed}s",
+                            error=str(e),
+                            note="Start local-ai-server container if you want to use local STT/TTS/LLM",
+                        )
+                        self._server_unavailable = True
+                        return False
                     logger.warning(
                         "Connection failed after all retries",
                         attempts=len(backoff_schedule),
                         total_elapsed=f"{total_elapsed}s",
-                        error=str(e)
+                        error=str(e),
                     )
             except Exception as e:
                 logger.warning(

@@ -599,14 +599,24 @@ def _ulaw_recording_to_wav_bytes(recording: Path) -> bytes:
 
 
 def _wav_recording_requires_transcode(recording: Path) -> bool:
-    if recording.suffix == ".WAV":
-        return True
+    """Decide whether a .wav/.WAV recording needs a sox transcode for browser playback.
+
+    Decision is based on the WAV header (compression type), not filename
+    case. Previously `.WAV` (uppercase) was unconditionally marked as
+    transcode-required, which forced `sox` for what may be a perfectly
+    standard PCM WAV — and failed with 415 in environments without
+    `sox`. We now probe the actual content for both cases (Codex P2 on
+    PR #396).
+    """
     if recording.suffix.lower() != ".wav":
         return False
     try:
         with wave.open(str(recording), "rb") as wavf:
             return wavf.getcomptype() != "NONE"
-    except wave.Error:
+    except (wave.Error, EOFError, OSError):
+        # Not a parseable WAV header (truncated, non-PCM container,
+        # corrupted) — needs sox to interpret whatever the file
+        # actually contains.
         return True
 
 
