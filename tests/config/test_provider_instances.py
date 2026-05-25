@@ -1,7 +1,18 @@
+import errno
+import os
+import stat
+
 import pytest
 
 from src.config.normalization import ConfigValidationError, normalize_pipelines, validate_providers
-from src.config.provider_instances import provider_kind
+from src.config.provider_instances import (
+    ProviderInstanceError,
+    read_secret_file,
+    read_secret_file_for_provider,
+    safe_secret_path,
+    write_secret_file_bytes,
+    provider_kind,
+)
 
 
 def test_provider_kind_uses_type_for_duplicate_full_agent_instances():
@@ -110,3 +121,51 @@ def test_provider_key_cannot_collide_with_pipeline_name():
 
     with pytest.raises(ConfigValidationError):
         validate_providers(config_data)
+
+
+def test_read_secret_file_rejects_leaf_symlink(tmp_path):
+    target = tmp_path / "target-secret"
+    target.write_text("secret", encoding="utf-8")
+    link = tmp_path / "linked-secret"
+    link.symlink_to(target)
+
+    with pytest.raises(OSError) as exc_info:
+        read_secret_file(str(link))
+
+    assert exc_info.value.errno in {errno.ELOOP, errno.EMLINK}
+
+
+def test_provider_secret_reader_rejects_leaf_symlink(tmp_path):
+    provider_dir = tmp_path / "acme"
+    provider_dir.mkdir()
+    target = tmp_path / "target-secret"
+    target.write_text("secret", encoding="utf-8")
+    (provider_dir / "api-key").symlink_to(target)
+
+    with pytest.raises(OSError) as exc_info:
+        read_secret_file_for_provider("acme", "api-key", root=str(tmp_path))
+
+    assert exc_info.value.errno in {errno.ELOOP, errno.EMLINK}
+
+
+def test_safe_secret_path_rejects_provider_directory_symlink_escape(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (tmp_path / "acme").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ProviderInstanceError):
+        safe_secret_path("acme", "api-key", root=str(tmp_path))
+
+
+def test_write_secret_file_bytes_creates_owner_only_file_under_permissive_umask(
+    tmp_path,
+):
+    previous_umask = os.umask(0)
+    try:
+        write_secret_file_bytes(str(tmp_path / "api-key"), b"secret")
+    finally:
+        os.umask(previous_umask)
+
+    secret_path = tmp_path / "api-key"
+    assert secret_path.read_bytes() == b"secret"
+    assert stat.S_IMODE(secret_path.stat().st_mode) == 0o600

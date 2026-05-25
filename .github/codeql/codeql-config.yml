@@ -8,7 +8,8 @@
 # follow our validation across function boundaries.
 #
 # IF YOU TOUCH credential-storage code in these files, drop the
-# corresponding `paths-ignore` line and re-run CodeQL to re-audit.
+# corresponding `paths-ignore` line and the matching SARIF filter entry in
+# .github/workflows/codeql.yml, then re-run CodeQL to re-audit.
 
 name: "AAVA CodeQL config"
 
@@ -50,25 +51,23 @@ paths-ignore:
 
   # src/config/provider_instances.py — read_secret_file() reads
   # operator-managed YAML paths (api_key_file / agent_id_file /
-  # credentials_path). After FOUR refactor attempts CodeQL still
-  # flags every filesystem sink:
+  # credentials_path). After several refactor attempts CodeQL still
+  # flags filesystem sinks:
   #
   #   - e88db765: realpath + startswith containment → flagged
   #   - bb42f757: Path.relative_to() containment → flagged
   #   - 9e5dcc31: (provider_key, credential_name) sink signature → flagged
   #   - 698cdaa5: static-tuple allowlist + os.open(O_NOFOLLOW) → flagged
+  #   - d0f613a5: removed allowlist to preserve operator-managed paths → flagged
   #
-  # The 698cdaa5 refactor is retained because it provides real
-  # defense-in-depth (symlink attack defense via O_NOFOLLOW, strict
-  # allowlist of 5 known-safe path prefixes, normpath collapse of
-  # `..`, explicit absolute-path requirement). CodeQL just can't
-  # model this pattern in its taint graph.
+  # The current implementation keeps the non-breaking defenses: explicit
+  # `..` rejection and os.open(O_RDONLY | O_NOFOLLOW). We intentionally
+  # do not bound read_secret_file() to a static root allowlist because
+  # legacy/operator-managed configs may use custom absolute secret paths
+  # such as home directories, /opt, /srv, or mounted secret volumes.
   #
   # Defenses in place (verified):
-  #   - explicit `..` rejection via os.path.normpath() collapse
-  #   - absolute-path requirement
-  #   - allowlist of 5 root prefixes (_ALLOWED_SECRET_ROOTS):
-  #     PROVIDER_SECRETS_ROOT, /app/project/secrets, /run/secrets,
-  #     /etc/aava, /var/lib/aava
-  #   - os.open(O_RDONLY | O_NOFOLLOW) defeats symlink attacks
+  #   - explicit `..` path-segment rejection before opening
+  #   - os.open(O_RDONLY | O_NOFOLLOW) defeats leaf symlink attacks
+  #     without resolving the leaf path before open
   - src/config/provider_instances.py

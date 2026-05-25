@@ -1957,6 +1957,7 @@ def _provider_instances_module():
         resolve_secret_value,
         safe_secret_path,
         validate_provider_key,
+        write_secret_file_bytes,
     )
     return {
         "api_key_kinds": API_KEY_COMPATIBLE_KINDS,
@@ -1967,6 +1968,7 @@ def _provider_instances_module():
         "resolve_secret_value": resolve_secret_value,
         "safe_secret_path": safe_secret_path,
         "validate_provider_key": validate_provider_key,
+        "write_secret_file_bytes": write_secret_file_bytes,
     }
 
 
@@ -2047,9 +2049,9 @@ def _write_provider_secret(provider_key: str, credential_name: str, content: byt
     need to read them to make API calls, and the env-vars-only
     alternative does not scale to multi-tenant deployments.
 
-    Atomic write via per-writer unique ``.tmp`` sibling + ``os.replace``
-    so concurrent uploads can't collide and chmod 0o600 lands before
-    the rename, so the temp file is owner-only readable even mid-write.
+    Atomic write via per-writer unique ``.tmp`` sibling + ``os.replace``.
+    The temp file is created with mode 0o600, so it is owner-only readable
+    before content is written and before the rename.
     """
     import uuid
 
@@ -2076,9 +2078,7 @@ def _write_provider_secret(provider_key: str, credential_name: str, content: byt
         # nosec B306: writing the credential to a chmod-600 file under
         # the secrets root is the intended storage layer for
         # per-instance API keys; see docstring above.
-        with open(temp_path, "wb") as f:
-            f.write(content)
-        os.chmod(temp_path, 0o600)
+        helpers["write_secret_file_bytes"](str(temp_path), content)
         os.replace(temp_path, target)
     finally:
         try:

@@ -121,7 +121,9 @@ def safe_secret_path(provider_key: str, filename: str, *, root: str = PROVIDER_S
 
     Validates ``provider_key`` against the strict allowlist, validates
     ``filename`` against a similarly strict allowlist (no separators / no
-    traversal), resolves both to a real path, and re-checks containment.
+    traversal), resolves the root and parent directory, and re-checks
+    containment without resolving the leaf file itself. This preserves
+    ``O_NOFOLLOW`` protection for callers that open the returned path.
     Callers must use this helper for every filesystem operation that
     interpolates a provider key — never build paths from untrusted strings
     directly.
@@ -131,14 +133,24 @@ def safe_secret_path(provider_key: str, filename: str, *, root: str = PROVIDER_S
         raise ProviderInstanceError("Credential filename is required")
     if not re.fullmatch(r"^[A-Za-z0-9_.\-]{1,64}$", filename) or filename in {".", ".."}:
         raise ProviderInstanceError("Invalid credential filename")
-    root_real = os.path.realpath(root)
-    candidate = os.path.realpath(os.path.join(root_real, provider_key, filename))
-    # Containment check: candidate must be inside root_real (allow == root_real
-    # for callers that want the root itself, though the join above prevents
-    # that in practice because we always pass a filename).
-    if not (candidate == root_real or candidate.startswith(root_real + os.sep)):
+
+    root_real = Path(root).resolve(strict=False)
+    parent = root_real / provider_key
+    parent_real = parent.resolve(strict=False)
+    # Containment check: the credential directory must be inside root_real.
+    # We deliberately do not resolve the leaf file here; resolving it would
+    # follow a symlink before callers can reject it with O_NOFOLLOW.
+    try:
+        parent_real.relative_to(root_real)
+    except ValueError as exc:
+        raise ProviderInstanceError("Provider credential path escapes secrets root") from exc
+
+    candidate = parent / filename
+    try:
+        candidate.relative_to(root_real)
+    except ValueError as exc:
         raise ProviderInstanceError("Provider credential path escapes secrets root")
-    return candidate
+    return str(candidate)
 
 
 def read_secret_file_for_provider(provider_key: str, filename: str, *, root: str = PROVIDER_SECRETS_ROOT) -> str:
@@ -162,6 +174,28 @@ def read_secret_file_for_provider(provider_key: str, filename: str, *, root: str
         except OSError:
             pass
         raise
+
+
+def write_secret_file_bytes(path: str, content: bytes) -> None:
+    """Write a secret file with owner-only permissions at creation time."""
+    import os as _os
+
+    flags = _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL
+    if hasattr(_os, "O_NOFOLLOW"):
+        flags |= _os.O_NOFOLLOW
+
+    fd: int | None = None
+    try:
+        fd = _os.open(path, flags, 0o600)
+        with _os.fdopen(fd, "wb") as f:
+            fd = None
+            f.write(content)
+    finally:
+        if fd is not None:
+            try:
+                _os.close(fd)
+            except OSError:
+                pass
 
 
 def validate_provider_instances(config_data: Dict[str, Any]) -> None:
@@ -326,9 +360,8 @@ def read_secret_file(path: str) -> str:
     - ``..`` segments rejected before any filesystem op — closes the
       operator-typo / renderer-bug → arbitrary-file-read gap
       (CodeRabbit major on PR #396).
-    - File is opened with ``O_RDONLY | O_NOFOLLOW`` to defeat symlink
-      attacks at the leaf (if an attacker can plant a symlink at the
-      resolved path, ``O_NOFOLLOW`` refuses to traverse it).
+    - File is opened with ``O_RDONLY | O_NOFOLLOW`` to defeat leaf
+      symlink attacks.
 
     We deliberately do NOT bound to a static allowlist of roots:
     operators with custom secrets dirs (home-dir, /opt, /srv, custom
@@ -350,15 +383,12 @@ def read_secret_file(path: str) -> str:
     if any(part == ".." for part in candidate.parts):
         raise ProviderInstanceError("Secret file path may not contain '..'")
 
-    # Resolve to absolute so the O_NOFOLLOW guard sees the final path.
-    resolved = candidate.resolve()
-
     # Open with O_NOFOLLOW to refuse traversing a symlink at the
     # leaf — defense against an attacker planting a symlink to e.g.
-    # /etc/passwd at the configured path. Real security improvement
-    # over the previous Path.read_text() implementation (which would
-    # silently follow symlinks).
-    fd = _os.open(str(resolved), _os.O_RDONLY | _os.O_NOFOLLOW)
+    # /etc/passwd at the configured path. Do not resolve the path first:
+    # Path.resolve() would follow the leaf symlink before O_NOFOLLOW can
+    # reject it.
+    fd = _os.open(str(candidate), _os.O_RDONLY | _os.O_NOFOLLOW)
     try:
         with _os.fdopen(fd, "rb") as f:
             return f.read().decode("utf-8").strip()
