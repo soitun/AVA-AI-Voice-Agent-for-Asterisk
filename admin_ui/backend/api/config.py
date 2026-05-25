@@ -13,6 +13,7 @@ import ssl
 import smtplib
 from email.message import EmailMessage
 from contextlib import contextmanager
+from pathlib import Path
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, Union
 from urllib.parse import urlparse
@@ -2028,45 +2029,60 @@ def _credential_allowed_for_kind(kind: str, credential_name: str) -> bool:
     return False
 
 
+def _bound_to_secrets_root(path: str) -> Path:
+    """Resolve ``path`` and assert it lives under ``PROVIDER_SECRETS_ROOT``.
+
+    Uses :func:`pathlib.Path.relative_to` as the containment check —
+    this is the CodeQL-recognized sanitizer pattern for path-injection
+    (CodeQL CWE-022). Returns the resolved Path for the caller to use;
+    raises HTTPException 400 if the resolved path escapes the secrets
+    root.
+    """
+    root = Path(PROVIDER_SECRETS_ROOT).resolve()
+    target = Path(path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Provider credential path escapes secrets root",
+        ) from exc
+    return target
+
+
 def _write_provider_secret(path: str, content: bytes) -> None:
     """Atomically write a per-instance provider credential to disk.
 
-    This is the canonical sink for per-tenant API keys / agent IDs /
-    Vertex JSON. Storing credentials in chmod-600 files under
-    :data:`PROVIDER_SECRETS_ROOT` is the intentional design (see
+    Per-instance API keys / agent IDs / Vertex JSON live as chmod-600
+    files under :data:`PROVIDER_SECRETS_ROOT` (see
     :doc:`docs/Multi-Instance-Full-Agent-Providers`): runtime providers
-    need to read the secret to make API calls, and the alternative
-    (env-vars only) does not scale to multi-tenant deployments.
+    need to read them to make API calls, and the env-vars-only
+    alternative does not scale to multi-tenant deployments.
 
-    Defense in depth here:
+    Defense in depth:
 
-    1. We re-bound the target path inside :data:`PROVIDER_SECRETS_ROOT`
-       even though every caller already goes through
-       :func:`_provider_secret_path` / :func:`safe_secret_path` —
-       CodeQL flags every interpolation of request-derived data into
-       file ops, and the local re-check gives the scanner a sanitizer
-       it can recognize. (Path traversal alert IDs 1704–1713.)
-    2. We write via a ``.tmp`` sibling + ``os.replace`` so we never
-       leave a partially-written secret on disk.
-    3. We chmod 0o600 before the rename so even briefly the temp file
-       is owner-only readable.
+    1. The path is re-resolved and bounded under
+       :data:`PROVIDER_SECRETS_ROOT` via :func:`_bound_to_secrets_root`,
+       which uses :meth:`pathlib.Path.relative_to` as the containment
+       check — the CodeQL-recognized sanitizer pattern for path
+       injection (CodeQL CWE-022 / path-traversal alerts 1704–1726).
+       Every caller also pre-validates the provider key via
+       :func:`safe_secret_path` before reaching this sink.
+    2. Atomic write via ``.tmp`` sibling + ``os.replace`` so a
+       partially-written secret can never be observed.
+    3. chmod 0o600 before the rename so the temp file is owner-only
+       readable even mid-write.
     """
-    root_real = os.path.realpath(PROVIDER_SECRETS_ROOT)
-    target_real = os.path.realpath(path)
-    if not (target_real == root_real or target_real.startswith(root_real + os.sep)):
-        # Refuse to write outside the secrets root. Callers should have
-        # produced a safe path via _provider_secret_path; if we got here
-        # with something else, treat it as a hard bug.
-        raise HTTPException(status_code=400, detail="Refused to write secret outside provider secrets root")
-    os.makedirs(os.path.dirname(target_real), exist_ok=True)
-    temp_path = f"{target_real}.tmp"
-    # nosec: writing the credential to a chmod-600 file under the secrets
-    # root is the intended storage layer for per-instance API keys; see
-    # docstring above.
+    target = _bound_to_secrets_root(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target.with_suffix(target.suffix + ".tmp")
+    # nosec B306: writing the credential to a chmod-600 file under the
+    # secrets root is the intended storage layer for per-instance API
+    # keys; see docstring above.
     with open(temp_path, "wb") as f:
         f.write(content)
     os.chmod(temp_path, 0o600)
-    os.replace(temp_path, target_real)
+    os.replace(temp_path, target)
 
 
 def _save_merged_config(merged_config: Dict[str, Any]) -> None:
@@ -2121,28 +2137,28 @@ def _migrate_inline_provider_secrets(config_data: Dict[str, Any]) -> bool:
 def _credential_metadata(path: str, credential_name: str) -> Dict[str, Any]:
     """Stat + optional JSON-parse a per-instance credential file.
 
-    Re-bound the input path to :data:`PROVIDER_SECRETS_ROOT` so the
-    filesystem operations below have a local sanitizer (CodeQL alert
-    IDs 1709–1711). Every caller already builds the path via
-    :func:`_provider_secret_path`; this is a defense-in-depth check.
+    Uses :func:`_bound_to_secrets_root` so the filesystem operations
+    below have a CodeQL-recognized sanitizer (Path.relative_to)
+    bounding the input to :data:`PROVIDER_SECRETS_ROOT`. Returns a
+    non-uploaded shape if the path escapes the secrets root.
     """
-    root_real = os.path.realpath(PROVIDER_SECRETS_ROOT)
-    target_real = os.path.realpath(path)
-    if not (target_real == root_real or target_real.startswith(root_real + os.sep)):
+    try:
+        target = _bound_to_secrets_root(path)
+    except HTTPException:
         return {"uploaded": False, "path": path, "error": "Path outside provider secrets root"}
-    if not os.path.exists(target_real):
-        return {"uploaded": False, "path": target_real}
-    stat = os.stat(target_real)
+    if not target.exists():
+        return {"uploaded": False, "path": str(target)}
+    stat = target.stat()
     meta: Dict[str, Any] = {
         "uploaded": True,
-        "path": target_real,
+        "path": str(target),
         "uploaded_at": stat.st_mtime,
     }
     if credential_name == "vertex-json":
         try:
             import json
 
-            with open(target_real, "r") as f:
+            with open(target, "r") as f:
                 creds = json.load(f)
             meta.update(
                 {
@@ -2260,15 +2276,19 @@ async def delete_provider_credential(provider_key: str, credential_name: str):
     providers[provider_key] = provider_cfg
     merged["providers"] = providers
     _save_merged_config(merged)
-    # Re-bound the unlink target inside the secrets root before removing.
-    # `path` was produced by `_provider_secret_path` for this request, but
-    # CodeQL flags the os.remove() interpolation; the local realpath +
-    # containment check gives the scanner a sanitizer it recognizes
-    # (alert IDs 1712, 1713).
-    root_real = os.path.realpath(PROVIDER_SECRETS_ROOT)
-    target_real = os.path.realpath(path)
-    if (target_real == root_real or target_real.startswith(root_real + os.sep)) and os.path.exists(target_real):
-        os.remove(target_real)
+    # Re-bound the unlink target inside the secrets root before
+    # removing. Uses :func:`_bound_to_secrets_root` (Path.relative_to)
+    # — the CodeQL-recognized sanitizer for path-injection
+    # (CWE-022 / alerts 1712, 1713, 1722, 1723).
+    try:
+        target = _bound_to_secrets_root(path)
+    except HTTPException:
+        # Out-of-bounds path is treated as "nothing to delete on disk".
+        # The YAML field has already been popped; we just don't try to
+        # unlink an unrelated file.
+        return {"status": "success", "restart_pending": True}
+    if target.exists():
+        target.unlink()
     return {"status": "success", "restart_pending": True}
 
 
