@@ -298,7 +298,10 @@ def resolve_secret_value(
     if file_path:
         try:
             return read_secret_file(file_path)
-        except Exception:
+        except (OSError, UnicodeError, ProviderInstanceError):
+            # Treat missing / permission-denied / undecodable files as
+            # "no credentials" so the caller can fall back to env/inline.
+            # Don't swallow programmer errors (CodeRabbit on PR #396).
             return ""
 
     env_name = str(provider_cfg.get(env_field) or "").strip()

@@ -37,7 +37,12 @@ const GrokProviderForm: React.FC<GrokProviderFormProps> = ({ config, onChange, p
     };
 
     const isNamedVoice = GROK_VOICES.some((v) => v.value === config.voice);
-    const voiceMode = isNamedVoice || !config.voice ? 'named' : 'custom';
+    // Treat undefined/null as named (initial state), but empty string as
+    // custom — picking "Custom voice ID" sets voice to '' and we used to
+    // collapse straight back to named, making custom unselectable
+    // (CodeRabbit on PR #396).
+    const voiceMode =
+        config.voice === undefined || config.voice === null || isNamedVoice ? 'named' : 'custom';
 
     return (
         <div className="space-y-6">

@@ -3752,6 +3752,12 @@ def _ms_device_flow_worker(flow_id: str, tenant_id: str, client_id: str, account
                 }
             return
         _persist_ms_token_cache(cache, account_key)
+        # Capture the canonical cache path for the success payload. The
+        # caller surfaces this in /devices/poll so the UI can show where
+        # the token cache landed. Was referenced at the result-dict
+        # assembly below but never defined in this scope — CodeRabbit
+        # critical on PR #396.
+        token_cache_path = _ms_token_cache_path_for_key(account_key)
         access_token = result["access_token"]
         me = _ms_graph_request_with_token(access_token, "GET", "/me")
         # Paginate /me/calendars. Without this, accounts with many calendars

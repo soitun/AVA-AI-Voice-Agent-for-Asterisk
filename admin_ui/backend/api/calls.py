@@ -627,7 +627,20 @@ def _transcode_recording_to_wav_bytes(recording: Path) -> bytes:
             status_code=415,
             detail="Recording format requires sox for browser playback, but sox is not installed",
         )
-    timeout_sec = float(os.getenv("AAVA_RECORDING_TRANSCODE_TIMEOUT_SEC", "120") or "120")
+    raw_timeout = os.getenv("AAVA_RECORDING_TRANSCODE_TIMEOUT_SEC", "120")
+    try:
+        timeout_sec = float(raw_timeout or "120")
+        if timeout_sec <= 0:
+            raise ValueError("must be > 0")
+    except (TypeError, ValueError):
+        # Don't let a typo'd env var (e.g. "120s" or empty string) escape
+        # as a 500 — fall back to the documented default. CodeRabbit
+        # quick-win on PR #396.
+        logger.warning(
+            "Invalid AAVA_RECORDING_TRANSCODE_TIMEOUT_SEC=%r; defaulting to 120s",
+            raw_timeout,
+        )
+        timeout_sec = 120.0
     try:
         result = subprocess.run(
             [sox, str(recording), "-t", "wav", "-"],
@@ -649,8 +662,19 @@ def _transcode_recording_to_wav_bytes(recording: Path) -> bytes:
 def _recording_response(recording: Path):
     suffix = recording.suffix.lower()
     if suffix == ".ulaw":
+        try:
+            wav_bytes = _ulaw_recording_to_wav_bytes(recording)
+        except Exception as err:
+            # Corrupt .ulaw should surface as a controlled client error,
+            # not a 500. Mirrors the sox transcode-failure path
+            # (CodeRabbit on PR #396).
+            logger.warning("Failed to decode .ulaw recording for playback: %s", err)
+            raise HTTPException(
+                status_code=422,
+                detail="Recording file could not be decoded for playback",
+            ) from err
         return Response(
-            content=_ulaw_recording_to_wav_bytes(recording),
+            content=wav_bytes,
             media_type="audio/wav",
             headers={"Content-Disposition": f'inline; filename="{recording.with_suffix(".wav").name}"'},
         )
@@ -708,7 +732,14 @@ async def _stream_call_recording(record_id: str):
     if not recording or not recording.is_file():
         raise HTTPException(status_code=404, detail="Recording file not found")
 
-    if recording.stat().st_size <= _MIN_VALID_WAV_SIZE:
+    # Codec-aware empty detection: the 44-byte threshold is WAV-header
+    # specific. A .ulaw / .gsm recording with 44 bytes of audio is short
+    # but valid; only reject when (a) size==0, or (b) it's a .wav and
+    # the file is at or below the bare WAV header size (CodeRabbit on
+    # PR #396).
+    size = recording.stat().st_size
+    is_wav = recording.suffix.lower() == ".wav"
+    if size == 0 or (is_wav and size <= _MIN_VALID_WAV_SIZE):
         raise HTTPException(status_code=404, detail="Recording is empty (no audio captured)")
 
     return _recording_response(recording)

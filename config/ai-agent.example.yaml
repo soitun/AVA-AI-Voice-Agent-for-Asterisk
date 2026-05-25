@@ -104,8 +104,10 @@ pipelines:
           encoding: mulaw
           sample_rate: 8000
 
-# Select an active pipeline when using the pipeline path
-active_pipeline: cloud_openai
+# Select an active pipeline when using the pipeline path.
+# Matches default_provider above (local_hybrid) so the example "just works" as a
+# privacy-focused local pipeline. Switch to cloud_openai for the cloud example.
+active_pipeline: local_hybrid
 
 # Transport modes
 # NOTE: For remote Asterisk deployments (AI engine on different machine than Asterisk):

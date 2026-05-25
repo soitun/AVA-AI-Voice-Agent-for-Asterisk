@@ -92,16 +92,25 @@ const HelpTooltip: React.FC<HelpTooltipProps> = ({ content, link, linkText = 'Le
             : '-top-1 border-l border-t';
 
     return (
-        <div className="relative inline-block">
+        // Hover handlers on the wrapper so the popover stays open while
+        // the cursor traverses from the icon to the popover content
+        // (links / Learn-more anchor were previously unreachable because
+        // onMouseLeave on the button alone closed the popover the moment
+        // the pointer crossed the gap). CodeRabbit major on PR #396.
+        <div
+            className="relative inline-block"
+            onMouseEnter={() => setIsOpen(true)}
+            onMouseLeave={() => setIsOpen(false)}
+        >
             <button
                 ref={buttonRef}
                 type="button"
+                aria-label="Show help"
+                aria-expanded={isOpen}
                 className="inline-flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
-                onMouseEnter={() => setIsOpen(true)}
-                onMouseLeave={() => setIsOpen(false)}
                 onClick={(e) => {
                     e.preventDefault();
-                    setIsOpen(!isOpen);
+                    setIsOpen((prev) => !prev);
                 }}
             >
                 <HelpCircle className="w-4 h-4" />

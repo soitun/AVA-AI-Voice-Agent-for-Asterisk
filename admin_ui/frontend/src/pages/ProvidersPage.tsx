@@ -161,7 +161,11 @@ const ProvidersPage: React.FC = () => {
         setEditingProvider(name);
         const providerData = { ...(config.providers?.[name] || {}) };
 
-        if (!providerData.type || providerData.type === 'full') {
+        // Only infer concrete type when YAML didn't specify one. Rewriting
+        // a legacy `type: full` value into a name-heuristic guess silently
+        // changes the implementation kind for instances with neutral keys
+        // like `acme_primary` (CodeRabbit major on PR #396).
+        if (!providerData.type) {
             if (isFullAgentProvider(providerData, name)) {
                 const lowerName = name.toLowerCase();
                 if (lowerName === 'local' || lowerName.includes('local')) providerData.type = 'local';
@@ -569,9 +573,15 @@ const ProvidersPage: React.FC = () => {
             return;
         }
         if (isNewProvider && String(providerForm.type || '').toLowerCase() === 'local') {
-            const hasLocal = Object.entries(newConfig.providers || {}).some(([key, value]: [string, any]) =>
-                key !== finalName && String(value?.type || key).toLowerCase() === 'local'
-            );
+            // Match both `type: local` AND the legacy `type: full` shape
+            // (where the YAML key was `local` but type defaulted to `full`),
+            // so a second local full-agent can't slip in undetected
+            // (CodeRabbit on PR #396).
+            const hasLocal = Object.entries(newConfig.providers || {}).some(([key, value]: [string, any]) => {
+                if (key === finalName) return false;
+                const t = String(value?.type || key).toLowerCase();
+                return t === 'local' || (t === 'full' && key.toLowerCase() === 'local');
+            });
             if (hasLocal) {
                 toast.error('Only one local full-agent provider can be configured.');
                 return;

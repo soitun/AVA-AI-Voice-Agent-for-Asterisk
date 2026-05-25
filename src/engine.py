@@ -7965,15 +7965,20 @@ class Engine:
             return bytes([0xFF]) * length  # μ-law silence
         return b"\x00" * length  # PCM16 silence (zeroed samples)
 
-    @staticmethod
     def _resolve_barge_in_min_ms(
+        self,
         session: CallSession,
         cfg,
         *,
         pipeline_mode: bool,
         provider_name: Optional[str] = None,
     ) -> int:
-        """Resolve effective barge-in min duration with local/pipeline-only first-turn fast path."""
+        """Resolve effective barge-in min duration with local/pipeline-only first-turn fast path.
+
+        Was previously decorated `@staticmethod` but the body calls
+        `self._get_provider_kind(...)`, which would have raised NameError
+        the first time the fast-path branch hit (CodeRabbit critical on PR #396).
+        """
         base_min = int(getattr(cfg, "pipeline_min_ms", 0) or getattr(cfg, "min_ms", 250)) if pipeline_mode else int(getattr(cfg, "min_ms", 250))
 
         scope_applies = pipeline_mode or (self._get_provider_kind(provider_name) == "local")

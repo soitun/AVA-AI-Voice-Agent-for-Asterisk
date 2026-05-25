@@ -2797,7 +2797,17 @@ async def validate_api_key(validation: ApiKeyValidation):
                     detail = ""
                     try:
                         body = response.json()
-                        detail = body.get("error") or body.get("message") or ""
+                        # xAI sometimes returns {"error": {"message": "..."}} (Google-like shape)
+                        # and sometimes {"error": "string"}. Unwrap the nested message
+                        # so the UI doesn't show "Details: {'message': ...}" verbatim
+                        # (CodeRabbit on PR #396).
+                        error = body.get("error")
+                        if isinstance(error, dict):
+                            detail = error.get("message") or error.get("code") or ""
+                        elif isinstance(error, str):
+                            detail = error
+                        else:
+                            detail = body.get("message") or ""
                     except ValueError:
                         detail = response.text or ""
                     return {

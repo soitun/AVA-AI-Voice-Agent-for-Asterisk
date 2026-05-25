@@ -50,6 +50,7 @@ export const getModularCapability = (provider: any): Capability | null => {
  * entries correctly.
  */
 const CANONICAL_FULL_AGENT_KEYS = new Set([
+    'local',
     'openai_realtime',
     'deepgram',
     'google_live',

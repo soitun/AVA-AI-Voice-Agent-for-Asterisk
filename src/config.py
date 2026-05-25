@@ -1285,7 +1285,7 @@ def validate_production_config(config: AppConfig) -> tuple[list[str], list[str]]
                 if not has_monolithic and not has_pipelines:
                     warnings.append(
                         "audio_transport=audiosocket but neither monolithic providers "
-                        "(openai_realtime, deepgram, google_live) nor pipelines are configured; "
+                        "(openai_realtime, deepgram, google_live, grok) nor pipelines are configured; "
                         "AudioSocket requires at least one provider type to function"
                     )
             

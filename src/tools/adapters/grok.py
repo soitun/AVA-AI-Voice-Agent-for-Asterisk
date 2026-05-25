@@ -152,8 +152,15 @@ class GrokToolAdapter:
             return block_result
 
         try:
-            result = await tool.execute(parameters, exec_context)
-            sanitized = sanitize_tool_result_for_json_string(result)
+            raw_result = await tool.execute(parameters, exec_context)
+            sanitized = sanitize_tool_result_for_json_string(raw_result)
+            # Tools can return non-dict payloads (str/list/etc.). Wrap so
+            # the call_id / function_name attachment below is always safe
+            # — previously this mutated `result` and would AttributeError
+            # on non-dict returns, turning a successful tool exec into an
+            # adapter error (CodeRabbit major on PR #396).
+            if not isinstance(sanitized, dict):
+                sanitized = {"status": "success", "result": sanitized}
             logger.info(
                 "Tool executed",
                 call_id=context.get("call_id"),
@@ -168,9 +175,9 @@ class GrokToolAdapter:
                 tool=function_name,
                 result=sanitized,
             )
-            result['call_id'] = function_call_id
-            result['function_name'] = function_name
-            return result
+            sanitized['call_id'] = function_call_id
+            sanitized['function_name'] = function_name
+            return sanitized
         except Exception as e:
             error_msg = f"Tool execution failed: {str(e)}"
             logger.error(error_msg, exc_info=True)

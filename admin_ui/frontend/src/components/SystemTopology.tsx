@@ -496,10 +496,21 @@ export const SystemTopology = () => {
         {/* Compact at-a-glance health row: one line tells operators if anything
             is wrong, without scanning the architecture diagram. */}
         {(() => {
-          const totalProviders = state.configuredProviders.length;
-          const readyProviders = state.configuredProviders.filter(
+          // Only enabled providers contribute to the ratio + health. Counting
+          // disabled providers in totalProviders made the headline numbers
+          // misleading, and ignoring providerReady let the strip say
+          // "All systems healthy" while an enabled provider was not_ready
+          // (CodeRabbit major on PR #396).
+          const enabledProviders = state.configuredProviders.filter(p => p.enabled);
+          const totalProviders = enabledProviders.length;
+          const readyProviders = enabledProviders.filter(
             p => state.providerReady[p.name] === 'ready'
           ).length;
+          const providersAllKnown =
+            enabledProviders.length === 0
+            || enabledProviders.every(p => (state.providerReady[p.name] ?? 'unknown') !== 'unknown');
+          const providersAnyError =
+            enabledProviders.some(p => state.providerReady[p.name] === 'not_ready');
           const totalModels = 3; // STT + LLM + TTS
           const loadedModels = [
             state.localAIModels?.stt?.loaded,
@@ -509,11 +520,13 @@ export const SystemTopology = () => {
           const allKnown =
             state.aiEngineStatus !== 'unknown'
             && state.localAIStatus !== 'unknown'
-            && state.ariConnected !== null;
+            && state.ariConnected !== null
+            && providersAllKnown;
           const anyError =
             state.aiEngineStatus === 'error'
             || state.localAIStatus === 'error'
-            || state.ariConnected === false;
+            || state.ariConnected === false
+            || providersAnyError;
           const overallStatus: 'healthy' | 'issue' | 'checking' =
             !allKnown ? 'checking' : anyError ? 'issue' : 'healthy';
           const statusColor = overallStatus === 'healthy'
