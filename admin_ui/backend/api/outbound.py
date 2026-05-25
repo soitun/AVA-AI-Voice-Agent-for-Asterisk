@@ -90,6 +90,22 @@ class RecordingRow(BaseModel):
     size_bytes: int = 0
 
 
+def _find_media_ulaw_path(base: str) -> Optional[str]:
+    """Resolve a `sound:ai-generated/<base>` file to an on-disk .ulaw path (case-insensitive suffix)."""
+    media_dir = _media_dir()
+    target_name = f"{base}.ulaw"
+    try:
+        for entry in os.listdir(media_dir):
+            if entry.lower() != target_name.lower():
+                continue
+            full_path = os.path.join(media_dir, entry)
+            if os.path.isfile(full_path):
+                return full_path
+    except FileNotFoundError:
+        return None
+    return None
+
+
 def _media_uri_exists(media_uri: str) -> bool:
     uri = (media_uri or "").strip()
     if not uri.startswith("sound:ai-generated/"):
@@ -99,8 +115,7 @@ def _media_uri_exists(media_uri: str) -> bool:
         return False
     if (not _SAFE_NAME_RE.match(base)) or (".." in base):
         return False
-    p = os.path.join(_media_dir(), f"{base}.ulaw")
-    return os.path.exists(p)
+    return _find_media_ulaw_path(base) is not None
 
 def _safe_ai_generated_basename(media_uri: str) -> str:
     uri = (media_uri or "").strip()
@@ -130,17 +145,10 @@ def _ulaw_to_wav_bytes(ulaw_data: bytes) -> bytes:
 
 def _read_media_ulaw(media_uri: str) -> bytes:
     base = _safe_ai_generated_basename(media_uri)
-    media_dir = _media_dir()
-    target = f"{base}.ulaw"
-    try:
-        for entry in os.listdir(media_dir):
-            if entry != target:
-                continue
-            ulaw_path = os.path.join(media_dir, entry)
-            with open(ulaw_path, "rb") as f:
-                return f.read()
-    except FileNotFoundError:
-        pass
+    ulaw_path = _find_media_ulaw_path(base)
+    if ulaw_path:
+        with open(ulaw_path, "rb") as f:
+            return f.read()
     raise HTTPException(status_code=404, detail="Media file not found on server")
 
 def _convert_upload_to_ulaw(data: bytes, ext: str) -> bytes:
@@ -192,10 +200,10 @@ async def list_recordings():
     rows: List[RecordingRow] = []
     try:
         for entry in sorted(os.listdir(media_dir)):
-            if not entry.endswith(".ulaw"):
+            if not entry.lower().endswith(".ulaw"):
                 continue
             filename = entry
-            base = entry[:-5]
+            base = entry[: -len(Path(entry).suffix)] if Path(entry).suffix else entry
             path = os.path.join(media_dir, entry)
             try:
                 size_bytes = int(os.path.getsize(path))

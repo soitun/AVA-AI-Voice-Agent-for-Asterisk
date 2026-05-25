@@ -11,6 +11,8 @@ import logging
 import os
 import re
 import sys
+import audioop
+import wave
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -520,19 +522,39 @@ async def get_call_transcript(record_id: str):
 
 _RECORDING_BASE = Path("/mnt/asterisk_recordings")
 _MIN_VALID_WAV_SIZE = 44  # WAV header is 44 bytes; files <= header size have no audio
+_SUPPORTED_RECORDING_SUFFIXES = {".wav", ".ulaw"}
 
 
 def _has_exact_call_id(filename: str, call_id: str) -> bool:
     """Verify the filename contains the exact call_id as a delimited token.
 
-    Asterisk recording filenames use the pattern ``...-{epoch}.{seq}.wav``
+    Asterisk recording filenames use the pattern ``...-{epoch}.{seq}.{ext}``
     where ``{epoch}.{seq}`` is the channel unique ID (our ``call_id``).
     A naive ``*call_id*`` glob can false-match when one ID is a prefix of
     another (e.g. ``.26`` vs ``.265``).  We check that the call_id appears
-    bounded by non-alphanumeric characters (typically ``-`` and ``.wav``).
+    bounded by non-alphanumeric characters (typically ``-`` and ``.{ext}``).
     """
     import re
     return bool(re.search(rf"(?<![0-9]){re.escape(call_id)}(?![0-9])", filename))
+
+
+def _recording_has_audio(recording: Path) -> bool:
+    """Treat WAV header-only files as empty and require non-empty uLaw files."""
+    size = recording.stat().st_size
+    if recording.suffix.lower() == ".wav":
+        return size > _MIN_VALID_WAV_SIZE
+    return size > 0
+
+
+def _ulaw_to_wav_bytes(ulaw_data: bytes) -> bytes:
+    pcm16 = audioop.ulaw2lin(ulaw_data, 2)
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wavf:
+        wavf.setnchannels(1)
+        wavf.setsampwidth(2)
+        wavf.setframerate(8000)
+        wavf.writeframes(pcm16)
+    return out.getvalue()
 
 
 def _find_recording(call_id: str, start_time=None) -> Optional[Path]:
@@ -543,9 +565,11 @@ def _find_recording(call_id: str, start_time=None) -> Optional[Path]:
 
     import glob as _glob_mod
     safe_id = _glob_mod.escape(call_id)
-    pattern = f"*{safe_id}*.wav"
+    pattern = f"*{safe_id}*"
 
     def _check(match: Path) -> bool:
+        if match.suffix.lower() not in _SUPPORTED_RECORDING_SUFFIXES:
+            return False
         return (
             match.is_file()
             and match.resolve().is_relative_to(base.resolve())
@@ -567,7 +591,7 @@ def _find_recording(call_id: str, start_time=None) -> Optional[Path]:
             return match
 
     # Last resort: recursive search across all date folders
-    for match in base.glob(f"*/*/*/*{safe_id}*.wav"):
+    for match in base.glob(f"*/*/*/*{safe_id}*"):
         if _check(match):
             return match
 
@@ -595,18 +619,19 @@ async def get_call_recording_info(record_id: str):
         return RecordingInfoResponse()
 
     size = recording.stat().st_size
+    has_audio = _recording_has_audio(recording)
     return RecordingInfoResponse(
         has_recording=True,
         filename=recording.name,
         file_path=str(recording),
         file_size_bytes=size,
-        duration_hint="empty" if size <= _MIN_VALID_WAV_SIZE else None,
+        duration_hint="empty" if not has_audio else None,
     )
 
 
 @router.get("/calls/{record_id}/recording.wav")
 async def stream_call_recording(record_id: str):
-    """Stream the call recording WAV file for browser playback."""
+    """Stream call recordings for browser playback (WAV native, uLaw transcoded)."""
     store = _get_call_history_store()
     record = await store.get(record_id)
     if not record:
@@ -616,8 +641,15 @@ async def stream_call_recording(record_id: str):
     if not recording or not recording.is_file():
         raise HTTPException(status_code=404, detail="Recording file not found")
 
-    if recording.stat().st_size <= _MIN_VALID_WAV_SIZE:
+    if not _recording_has_audio(recording):
         raise HTTPException(status_code=404, detail="Recording is empty (no audio captured)")
+
+    suffix = recording.suffix.lower()
+    if suffix == ".ulaw":
+        with open(recording, "rb") as f:
+            ulaw_data = f.read()
+        wav_bytes = _ulaw_to_wav_bytes(ulaw_data)
+        return Response(content=wav_bytes, media_type="audio/wav")
 
     return FileResponse(
         path=str(recording),
