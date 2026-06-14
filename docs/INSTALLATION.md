@@ -14,8 +14,11 @@ This section is for operators upgrading an existing repo checkout (not a fresh i
 > Before upgrading from 6.x, review the **Upgrade Notes** at the top of the
 > [v7.0.0 CHANGELOG entry](../CHANGELOG.md) and the
 > [Agents migration guide](OPERATOR_MIGRATION.md). In short:
-> - **Default `admin`/`admin` login is removed** — a one-time admin password is printed to the
->   `admin_ui` logs on first start and must be changed at first login.
+> - **Default `admin`/`admin` login is removed.** If your install was **still using `admin`/`admin`**,
+>   it is automatically rotated on first start to a one-time random password printed to the `admin_ui`
+>   logs (`docker compose -p asterisk-ai-voice-agent logs admin_ui | grep PASSWORD`), which you must
+>   change at first login. **If you already changed the admin password, nothing changes — your existing
+>   login keeps working** and no new password is printed.
 > - **`/api/config/export` no longer bundles `.env`** by default (pass `include_secrets=true`).
 > - **Your contexts auto-migrate into `agents.db`** on first start; the **Contexts** page becomes
 >   read-only (manage agents in the new **Agents** tab). Existing dialplans keep working
