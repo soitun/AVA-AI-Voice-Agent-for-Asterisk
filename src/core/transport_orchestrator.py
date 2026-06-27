@@ -26,6 +26,34 @@ from ..providers.base import ProviderCapabilities
 logger = get_logger(__name__)
 
 
+def _coerce_optional_bool(value: Any) -> Optional[bool]:
+    """Normalize a tri-state on/off value (bool, int 0/1, or YAML string such as
+    'true'/'false'/'0'/'1'/'yes'/'no') to Optional[bool]. None or an unrecognized
+    value means inherit. Avoids the bool('false') == True footgun from quoted YAML
+    scalars and matches the agents.db coercion."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 0:
+            return False
+        if value == 1:
+            return True
+        return None  # unexpected numeric (e.g. 2, 0.5) → inherit, never force-enable
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("1", "true", "yes", "on"):
+            return True
+        if v in ("0", "false", "no", "off"):
+            return False
+        # Blank/whitespace ("") or any unrecognized string → inherit (None),
+        # matching absent/None and the agents.db NULL behavior — a cleared
+        # field must not become an explicit disable.
+        return None
+    return None
+
+
 @dataclass
 class AudioProfile:
     """User-defined audio profile from YAML configuration."""
@@ -175,6 +203,14 @@ class TransportOrchestrator:
                         or context_dict.get('disable_global_in_call_http_tools')  # legacy Admin UI key
                     ),
                     disable_global_post_call_tools=context_dict.get('disable_global_post_call_tools'),
+                    # Per-agent post-call email overrides (#437). email_enabled is
+                    # tri-state: absent key stays None (inherit). Coerce to bool so
+                    # an exported integer 0/1 works with the `is True`/`is False`
+                    # dispatch gate in email_summary.py, matching the agents.db path
+                    # (EngineAgentStore.resolve() already does the same coercion).
+                    email_recipient=context_dict.get('email_recipient'),
+                    email_from=context_dict.get('email_from'),
+                    email_enabled=_coerce_optional_bool(context_dict.get('email_enabled')),
                 )
                 logger.debug("Loaded context mapping", name=name, context=contexts[name])
             except Exception as exc:
