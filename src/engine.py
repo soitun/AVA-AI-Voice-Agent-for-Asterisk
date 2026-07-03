@@ -68,7 +68,7 @@ from .providers.elevenlabs_config import ElevenLabsAgentConfig
 from .core import SessionStore, PlaybackManager, ConversationCoordinator
 from .core.vad_manager import EnhancedVADManager, VADResult
 from .core.streaming_playback_manager import StreamingPlaybackManager
-from .core.transport_orchestrator import TransportOrchestrator, TransportProfile
+from .core.transport_orchestrator import TransportOrchestrator, TransportProfile, apply_context_voice
 from .core.models import CallSession
 from .core.outbound_store import get_outbound_store
 from .utils.audio_capture import AudioCaptureManager
@@ -6773,6 +6773,8 @@ class Engine:
                 pipeline_components=session.pipeline_components or {},
                 context_name=session.context_name,
                 routing_method=getattr(session, 'routing_method', None),
+                voice=getattr(session, 'session_voice', None),
+                voice_source=getattr(session, 'voice_source', None),
                 conversation_history=session.conversation_history or [],
                 outcome=outcome,
                 transfer_destination=session.transfer_destination,
@@ -14275,6 +14277,27 @@ class Engine:
                             provider_context["greeting"] = self._apply_prompt_template_substitution(greeting_override, session)
                         elif hasattr(context_config, 'greeting') and context_config.greeting:
                             provider_context['greeting'] = self._apply_prompt_template_substitution(context_config.greeting, session)
+
+                        # Per-agent/per-call voice override (7.3.0): override > agent > provider default.
+                        # Reconcile with what THIS provider can use so Call History records
+                        # the voice the session uses, not the raw request: closed-catalog
+                        # kinds (OpenAI/Google/Deepgram) validate here, Grok passes through
+                        # (custom clone IDs), and providers that never consume a context
+                        # voice (ElevenLabs Agent, Local) resolve to provider-default.
+                        from .utils.voice_catalog import known_voice_map
+                        _voice_kind = (
+                            "openai_realtime" if isinstance(provider, OpenAIRealtimeProvider)
+                            else "google_live" if isinstance(provider, GoogleLiveProvider)
+                            else "deepgram" if isinstance(provider, DeepgramProvider)
+                            else None
+                        )
+                        voice_source = apply_context_voice(
+                            provider_context, overrides, context_config, call_id=call_id,
+                            allowed_voices=known_voice_map(_voice_kind),
+                            voice_unsupported=isinstance(provider, (ElevenLabsAgentProvider, LocalProvider)),
+                        )
+                        session.session_voice = provider_context.get("voice")
+                        session.voice_source = voice_source
             except Exception as e:
                 logger.warning(f"Failed to build provider context: {e}", call_id=call_id, exc_info=True)
             

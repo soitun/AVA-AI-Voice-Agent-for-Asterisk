@@ -12,6 +12,7 @@ from websockets.asyncio.client import ClientConnection
 
 from structlog import get_logger
 from prometheus_client import Gauge, Info
+from ..utils.voice_catalog import known_voice_map
 from ..audio.resampler import (
     mulaw_to_pcm16le,
     pcm16le_to_mulaw,
@@ -34,6 +35,33 @@ def _log_provider_task_exception(task: asyncio.Task) -> None:
     exc = task.exception()
     if exc:
         logger.error("Provider background task failed", task_name=task.get_name(), error=str(exc), exc_info=exc)
+
+
+def resolve_speak_model(session_voice: Optional[str], configured: Optional[str]) -> str:
+    """Resolve the `agent.speak.provider.model` (aura voice) for a session.
+
+    Per-agent voice override wins over the configured `tts_model`; the shipped
+    default is the final fallback. Overrides are validated against the known
+    Aura catalog (Deepgram rejects unknown speak models at Settings time) —
+    an unrecognized value, e.g. stale free text from the pre-7.3.0
+    display-only agent field, falls back to the configured model instead of
+    failing the session. Module-level pure function so the behavior is
+    unit-testable without a full provider (same pattern as
+    ``build_listen_provider_block``). Both the primary Settings payload and the
+    UNPARSABLE-retry minimal payload consume this via the single `speak_model`
+    local in ``_configure_agent``.
+    """
+    if isinstance(session_voice, str) and session_voice.strip():
+        canonical = known_voice_map("deepgram").get(session_voice.strip().lower())
+        if canonical:
+            return canonical
+        logger.warning(
+            "Agent voice is not a known Deepgram Aura model; using configured speak model",
+            requested_voice=session_voice.strip(),
+        )
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    return "aura-asteria-en"
 
 
 def build_listen_provider_block(
@@ -425,6 +453,9 @@ class DeepgramProvider(AIProviderInterface):
                 self._allowed_tools = list(context.get("tools") or [])
             else:
                 self._allowed_tools = []
+            # Per-agent/per-call voice override (agent.speak.provider.model).
+            raw_voice = (context or {}).get("voice")
+            self._session_voice = raw_voice.strip() if isinstance(raw_voice, str) and raw_voice.strip() else None
             # Capture Deepgram request id if provided
             try:
                 rid = None
@@ -481,7 +512,16 @@ class DeepgramProvider(AIProviderInterface):
         # In normal config flow this fallback never fires (config provides "nova-3"),
         # but kept consistent so the unhappy-path doesn't downgrade behind users' backs.
         listen_model = self._get_config_value('model', None) or getattr(self.llm_config, 'listen_model', None) or "nova-3"
-        speak_model = self._get_config_value('tts_model', None) or getattr(self.llm_config, 'tts_model', None) or "aura-asteria-en"
+        speak_model = resolve_speak_model(
+            getattr(self, "_session_voice", None),
+            self._get_config_value('tts_model', None) or getattr(self.llm_config, 'tts_model', None),
+        )
+        if getattr(self, "_session_voice", None):
+            logger.info(
+                "Using per-call Deepgram speak-model override",
+                call_id=self.call_id,
+                speak_model=speak_model,
+            )
 
         # Use configured output encoding/sample rate directly (no catalog fetch needed)
         self._dg_output_encoding = self._canonicalize_encoding(output_encoding)
