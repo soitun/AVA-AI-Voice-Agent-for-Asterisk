@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.3.2] - 2026-07-11
+
 ### Added
 
 - **Opt-in provider-failure dialplan recovery** (`src/engine.py`, `src/config.py`, Admin UI Tools settings): `on_provider_failure: dialplan_redirect` can return an answered caller to an explicitly configured Asterisk context/extension/priority when provider or pipeline startup fails. The action is idempotent, marks the call as transferred before `continueInDialplan` so cleanup cannot hang up the caller, and falls back to the existing announcement/hangup behavior if configuration is missing or ARI continuation fails.
@@ -2156,7 +2158,8 @@ Version 4.1 introduces **unified tool calling architecture** enabling AI agents 
 - **v4.0.0** (2025-10-29) - Modular pipeline architecture, production monitoring, golden baselines
 - **v3.0.0** (2025-09-16) - Modular pipeline architecture, file based playback
 
-[Unreleased]: https://github.com/hkjarral/Asterisk-AI-Voice-Agent/compare/v7.3.1...HEAD
+[Unreleased]: https://github.com/hkjarral/Asterisk-AI-Voice-Agent/compare/v7.3.2...HEAD
+[7.3.2]: https://github.com/hkjarral/Asterisk-AI-Voice-Agent/compare/v7.3.1...v7.3.2
 [7.3.1]: https://github.com/hkjarral/Asterisk-AI-Voice-Agent/compare/v7.3.0...v7.3.1
 [7.3.0]: https://github.com/hkjarral/Asterisk-AI-Voice-Agent/compare/v7.2.1...v7.3.0
 [7.2.1]: https://github.com/hkjarral/Asterisk-AI-Voice-Agent/compare/v7.2.0...v7.2.1

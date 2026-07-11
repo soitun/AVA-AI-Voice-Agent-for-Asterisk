@@ -68,7 +68,7 @@ Run at least one successful call for each baseline you intend to claim as suppor
   candidate revision has evidence for every matrix row without exposing caller
   identity, transcripts, prompts, or tool arguments.
 
-### Current candidate status (`4b6d097b`)
+### v7.3.2 release evidence status
 
 - The supervised AudioSocket and ExternalMedia sweep has accepted evidence for
   every configured provider/pipeline pair, with exact call IDs and revisions in
@@ -83,9 +83,9 @@ Run at least one successful call for each baseline you intend to claim as suppor
 - GitHub Actions remains authoritative for coverage, image-size, and security
   scanner jobs; local results do not replace green PR checks.
 
-Do not change the README version badge, stable-version labels, or tagged upgrade
-commands to v7.3.2 until the tag exists. Candidate documentation may describe
-the unreleased scope as long as it labels it clearly.
+The `v7.3.2` tag is based on runtime merge `f49e35e0`; its release-prep commit
+changes documentation metadata only. Outstanding strict-candidate replay debt
+remains visible in the validation matrix rather than being rewritten as a pass.
 
 ## Post-release Hygiene
 
@@ -95,10 +95,10 @@ the unreleased scope as long as it labels it clearly.
 
 ## Documentation Checklist
 
-- [x] `docs/INSTALLATION.md` distinguishes latest stable v7.3.1 from the v7.3.2 candidate
+- [x] `docs/INSTALLATION.md` identifies v7.3.2 as the latest stable tag
 - [x] `SECURITY.md` supported versions table reflects the supported 7.3.x / 7.2.x trains
-- [x] `docs/ROADMAP.md` "What's Next" section reflects v7.3.2 candidate scope
+- [x] `docs/ROADMAP.md` records v7.3.2 as shipped
 - [x] `docs/README.md` links verified (no broken links to renamed/deleted files)
-- [x] `docs/contributing/README.md` distinguishes latest stable and active candidate
-- [ ] `README.md` version badge updated after the v7.3.2 tag is published
+- [x] `docs/contributing/README.md` identifies v7.3.2 as latest stable
+- [x] `README.md` version badge updated for v7.3.2
 - [x] `AVA.mdc` reviewed for drift (provider roster, architecture vocabulary, guardrails, "Last verified" stamp)

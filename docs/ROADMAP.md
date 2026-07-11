@@ -18,18 +18,18 @@ Active and upcoming work. Pick something up and [get involved](#how-to-contribut
 
 Outbound dialer shipped as Alpha in v5.0.0 — core scheduling, AMD, voicemail drop, consent gate, and Admin UI are working. Current focus: DNC, retry automation, outcome classification, and resilience hardening (see Phases 6-8 in spec).
 
-### v7.3.2 — Stabilization Release Candidate
+### v7.3.2 — Stabilization Release (Shipped July 2026)
 
 | Feature | Description | Status |
 |---------|-------------|--------|
-| **Call-path stabilization** | AudioSocket and ExternalMedia lifecycle fixes across full-agent providers and modular pipelines, including Grok interruption and caller inactivity. | 🧪 Candidate validation |
-| **Updater and rollback hardening** | Checkout ownership, active-call probes, dirty-worktree handling, source-built CLI versioning, and post-update validation retry. | 🧪 Candidate validation |
-| **Provider-failure recovery** | Opt-in, validated-target dialplan redirect with idempotent cleanup and announce/hangup fallback. | 🧪 PBX gate pending |
+| **Call-path stabilization** | AudioSocket and ExternalMedia lifecycle fixes across full-agent providers and modular pipelines, including Grok interruption and caller inactivity. | ✅ Shipped |
+| **Updater and rollback hardening** | Checkout ownership, active-call probes, dirty-worktree handling, source-built CLI versioning, and post-update validation retry. | ✅ Shipped |
+| **Provider-failure recovery** | Opt-in, validated-target dialplan redirect with idempotent cleanup and announce/hangup fallback. | ✅ Shipped (opt-in) |
 | **Contributor/release gates** | Admin backend/frontend PR checks, five-target CLI cross-compile, archived evidence index, and revision-pinned validation matrix. | ✅ Implemented |
 
-No provider additions are in scope. See the
-[v7.3.2 validation matrix](baselines/golden/v7.3.2-validation-matrix.md) for the
-remaining live and destructive-test gates.
+No provider additions were included. See the
+[v7.3.2 validation matrix](baselines/golden/v7.3.2-validation-matrix.md) for
+revision-pinned evidence and explicitly recorded follow-up validation debt.
 
 ### v7.3.1 — Caller Inactivity Watchdog (Shipped July 2026)
 
@@ -195,4 +195,4 @@ Longer-term goals that will shape the project's direction:
 
 ---
 
-**Last Updated**: July 2026 | **Latest Stable**: v7.3.1 | **Next Candidate**: v7.3.2
+**Last Updated**: July 2026 | **Latest Stable**: v7.3.2

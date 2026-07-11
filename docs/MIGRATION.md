@@ -2,7 +2,7 @@
 
 This guide covers upgrading between major versions of Asterisk AI Voice Agent.
 
-## v7.3.1 to v7.3.2 (release candidate)
+## v7.3.1 to v7.3.2
 
 v7.3.2 is a stabilization-only patch with no required schema migration and no
 new provider additions. Existing provider keys, agent slugs, dialplan variables,
@@ -22,9 +22,9 @@ Notable upgrade behavior:
 - Updater ownership, rollback, dirty-worktree handling, and validation retries
   are hardened without changing the normal `agent update` or Admin UI workflow.
 
-Do not deploy the candidate to production solely from this section. Complete
-the [v7.3.2 validation matrix](baselines/golden/v7.3.2-validation-matrix.md),
-take backups, and use the published tag when it exists.
+Review the [v7.3.2 validation matrix](baselines/golden/v7.3.2-validation-matrix.md),
+take backups, and deploy the published `v7.3.2` tag rather than an untagged
+branch.
 
 ## v7.x to v7.2.0
 

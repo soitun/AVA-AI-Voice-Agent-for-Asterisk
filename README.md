@@ -6,7 +6,7 @@
   <img alt="Asterisk AI Voice Agent" src="assets/banner_light_mode.png?v=9" width="100%">
 </picture>
 
-![Version](https://img.shields.io/badge/version-7.3.1-blue.svg)
+![Version](https://img.shields.io/badge/version-7.3.2-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![Docker](https://img.shields.io/badge/docker-compose-blue.svg)
@@ -167,10 +167,10 @@ docker compose -p asterisk-ai-voice-agent logs -f ai_engine
 ## 🎉 What's New
 
 <details open>
-<summary><b>v7.3.2 release candidate — stabilization only 🛡️</b></summary>
+<summary><b>v7.3.2 — stabilization release 🛡️</b></summary>
 
-v7.3.2 is the stabilization candidate for the next patch release; the
-latest published tag remains v7.3.1 until the release gate is complete.
+v7.3.2 is a stabilization-only patch release built from the supervised
+AudioSocket and ExternalMedia validation cycle.
 
 - **No new providers** — scope is limited to reliability, deployment safety,
   documentation, and contributor-facing CI.

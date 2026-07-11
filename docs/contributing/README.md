@@ -118,8 +118,7 @@ For end-user and operator documentation, see the parent [/docs](../) directory:
 
 ## 📅 Project Status
 
-- **Latest Stable Version:** 7.3.1
-- **Active Release Candidate:** 7.3.2 stabilization (see the [validation matrix](../baselines/golden/v7.3.2-validation-matrix.md))
+- **Latest Stable Version:** 7.3.2 (see the [validation matrix](../baselines/golden/v7.3.2-validation-matrix.md))
 - **Active Branch:** `main` (feature branches → PR to `main`)
 - **Roadmap:** See [/docs/ROADMAP.md](../ROADMAP.md)
 - **Community Features:** GitHub Issues + Discussions
