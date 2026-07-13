@@ -332,8 +332,29 @@
         "type": {
           "const": "switch_model"
         },
+        "scope": {
+          "enum": [
+            "global",
+            "session"
+          ]
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
         "dry_run": {
           "type": "boolean"
+        },
+        "llm_config": {
+          "type": "object",
+          "properties": {
+            "system_prompt": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
         },
         "stt_backend": {
           "type": "string"
@@ -505,6 +526,33 @@
           "type": "string"
         }
       },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "session"
+              }
+            },
+            "required": [
+              "scope"
+            ]
+          },
+          "then": {
+            "required": [
+              "call_id",
+              "llm_config"
+            ],
+            "properties": {
+              "llm_config": {
+                "required": [
+                  "system_prompt"
+                ]
+              }
+            }
+          }
+        }
+      ],
       "additionalProperties": true
     },
     "SwitchResponse": {
@@ -533,6 +581,21 @@
           "items": {
             "type": "string"
           }
+        },
+        "scope": {
+          "enum": [
+            "global",
+            "session"
+          ]
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": true

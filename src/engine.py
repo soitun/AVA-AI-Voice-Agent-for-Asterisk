@@ -496,6 +496,12 @@ class Engine:
         self._terminal_hangup_locks: Dict[str, asyncio.Lock] = {}
         self._terminal_hangup_started: Set[str] = set()
         self._terminal_fallback_tasks: Dict[str, asyncio.Task] = {}
+        # Local TTS farewells are a two-step exchange: execute hangup_call,
+        # then wait for Local AI Server to synthesize the tool's farewell.
+        # Keep that boundary separate from cleanup_after_tts so a stale
+        # AgentAudioDone from an interrupted response cannot end the call
+        # before the farewell audio has even arrived.
+        self._local_tts_farewell_pending: Set[str] = set()
         
         self.vad_manager: Optional[EnhancedVADManager] = None
         self.webrtc_vad = None
@@ -2691,6 +2697,25 @@ class Engine:
         self._set_provider_identity(provider, provider_key, provider_kind)
         return provider
 
+    async def _stop_call_provider_instance(
+        self,
+        call_id: str,
+        provider: Optional[AIProviderInterface],
+        provider_name: Optional[str] = None,
+    ) -> None:
+        """Stop a per-call provider and release call-owned persistent resources."""
+        if provider is None:
+            return
+        if isinstance(provider, LocalProvider):
+            await provider.close()
+        elif hasattr(provider, "stop_session"):
+            await provider.stop_session()
+        logger.info(
+            "AI provider session stopped",
+            call_id=call_id,
+            provider=provider_name,
+        )
+
     def _get_provider_kind(self, provider_name: Optional[str]) -> Optional[str]:
         if not provider_name:
             return None
@@ -4493,11 +4518,9 @@ class Engine:
         provider = self._call_providers.pop(session.call_id, None)
         if provider:
             try:
-                # Stop the provider's session for this call
-                if hasattr(provider, 'stop_session'):
-                    await provider.stop_session()
-                    logger.info("✅ AI provider session stopped",
-                               provider=session.provider_name)
+                await self._stop_call_provider_instance(
+                    session.call_id, provider, session.provider_name
+                )
             except Exception as e:
                 logger.warning(f"Failed to stop provider: {e}")
         
@@ -4744,7 +4767,7 @@ class Engine:
                         await self._save_session(latest)
                 except Exception:
                     logger.debug("Failed to clear predial action after bridge failure", call_id=call_id, exc_info=True)
-                if provider and hasattr(provider, "stop_session"):
+                if provider:
                     self._fire_and_forget(
                         self._stop_provider_after_predial_bridge(call_id, provider, getattr(session, "provider_name", None)),
                         name=f"predial-provider-stop-failed-{call_id}",
@@ -4772,7 +4795,7 @@ class Engine:
                 bridge_id=getattr(session, "bridge_id", None),
                 destination=getattr(session, "transfer_destination", None),
             )
-            if provider and hasattr(provider, "stop_session"):
+            if provider:
                 self._fire_and_forget(
                     self._stop_provider_after_predial_bridge(call_id, provider, getattr(session, "provider_name", None)),
                     name=f"predial-provider-stop-{call_id}",
@@ -4806,12 +4829,7 @@ class Engine:
 
     async def _stop_provider_after_predial_bridge(self, call_id: str, provider: Any, provider_name: Optional[str]) -> None:
         try:
-            await provider.stop_session()
-            logger.info(
-                "AI provider session stopped after predial bridge",
-                call_id=call_id,
-                provider=provider_name,
-            )
+            await self._stop_call_provider_instance(call_id, provider, provider_name)
         except Exception:
             logger.debug("Failed to stop provider after predial bridge", call_id=call_id, exc_info=True)
 
@@ -5338,6 +5356,36 @@ class Engine:
                 pass
 
         return mode, timeout_sec
+
+    def _should_send_provider_tool_result(
+        self,
+        *,
+        provider_name: str,
+        function_name: str,
+        result: Dict[str, Any],
+    ) -> bool:
+        """Return whether a provider needs the post-tool result turn.
+
+        An Asterisk-owned Local farewell is already synthesized and drained by
+        the engine. Sending the successful hangup result back to Local AI starts
+        a redundant LLM/TTS turn that can race the terminal ARI hangup. Local
+        TTS-owned farewells and all nonterminal tools still need their result.
+        """
+        if (
+            self._get_provider_kind(provider_name) != "local"
+            or function_name != "hangup_call"
+            or not bool((result or {}).get("will_hangup"))
+        ):
+            return True
+
+        providers_cfg = getattr(self.config, "providers", {}) or {}
+        local_config = None
+        if isinstance(providers_cfg, dict):
+            local_config = providers_cfg.get(provider_name)
+            if local_config is None:
+                local_config = providers_cfg.get("local")
+        farewell_mode, _timeout = self._resolve_local_farewell_settings(local_config)
+        return farewell_mode != "asterisk"
 
     async def _put_pipeline_stream_chunk(
         self,
@@ -6090,9 +6138,11 @@ class Engine:
         except Exception:
             pass
         provider = self._call_providers.pop(call_id, None)
-        if provider and hasattr(provider, "stop_session"):
+        if provider:
             try:
-                await provider.stop_session()
+                await self._stop_call_provider_instance(
+                    call_id, provider, getattr(session, "provider_name", None)
+                )
             except Exception:
                 logger.debug("Failed to stop provider session during attended transfer", call_id=call_id, exc_info=True)
 
@@ -6805,6 +6855,7 @@ class Engine:
                     fallback.cancel()
                 self._terminal_hangup_locks.pop(call_id, None)
                 self._terminal_hangup_started.discard(call_id)
+                self._local_tts_farewell_pending.discard(call_id)
             except Exception:
                 logger.debug("Terminal lifecycle cleanup failed", call_id=call_id, exc_info=True)
             bg_tasks = self._call_bg_tasks.pop(call_id, set())
@@ -6821,8 +6872,10 @@ class Engine:
                 pass
             try:
                 provider = self._call_providers.pop(call_id, None)
-                if provider and hasattr(provider, "stop_session"):
-                    await provider.stop_session()
+                if provider:
+                    await self._stop_call_provider_instance(
+                        call_id, provider, getattr(session, "provider_name", None)
+                    )
             except Exception:
                 logger.debug("Provider stop_session failed during cleanup", call_id=call_id, exc_info=True)
 
@@ -8832,17 +8885,20 @@ class Engine:
 
         return result
 
-    async def _is_inbound_isolated_for_barge_in_fallback(self, session: CallSession) -> bool:
+    async def _is_inbound_isolated_for_barge_in_fallback(
+        self, session: CallSession, *, source: str
+    ) -> bool:
         """Best-effort check that inbound audio is caller-isolated (safe to run local VAD for barge-in)."""
         try:
             import time
 
             now = time.time()
             state = session.vad_state.setdefault("barge_in_fallback", {})
-            last_ts = float(state.get("iso_check_ts", 0.0) or 0.0)
+            cache_prefix = "audiosocket" if source == "audiosocket" else "default"
+            last_ts = float(state.get(f"{cache_prefix}_iso_check_ts", 0.0) or 0.0)
             # Cache for 200ms to avoid per-frame lock contention in SessionStore.
             if last_ts and (now - last_ts) < 0.2:
-                return bool(state.get("iso_ok", False))
+                return bool(state.get(f"{cache_prefix}_iso_ok", False))
 
             playback_ids = []
             try:
@@ -8858,11 +8914,22 @@ class Engine:
             except Exception:
                 has_bridge_moh = False
 
-            ok = (not has_playback) and (not has_bridge_moh)
-            state["iso_check_ts"] = now
-            state["iso_ok"] = ok
-            state["iso_has_playback"] = has_playback
-            state["iso_has_bridge_moh"] = has_bridge_moh
+            # In the normal two-party AudioSocket bridge, Asterisk passes media
+            # from each channel to the other participant. Audio written by AVA
+            # into the AudioSocket channel goes to the caller; inbound socket
+            # media is therefore caller-side audio even while AVA's stream is
+            # active. Treating AVA's own stream as an isolation failure made the
+            # fallback require an active stream and reject every frame until that
+            # same stream ended. A bridge-MOH channel remains ambiguous and keeps
+            # the conservative fail-closed behavior.
+            if source == "audiosocket":
+                ok = not has_bridge_moh
+            else:
+                ok = (not has_playback) and (not has_bridge_moh)
+            state[f"{cache_prefix}_iso_check_ts"] = now
+            state[f"{cache_prefix}_iso_ok"] = ok
+            state[f"{cache_prefix}_iso_has_playback"] = has_playback
+            state[f"{cache_prefix}_iso_has_bridge_moh"] = has_bridge_moh
             return ok
         except Exception:
             return False
@@ -8906,7 +8973,9 @@ class Engine:
             # (bridge mix excludes the ExternalMedia channel's own transmitted audio), so we skip
             # the playback/MOH isolation heuristic which would otherwise prevent barge-in during TTS.
             if source != "externalmedia":
-                if not await self._is_inbound_isolated_for_barge_in_fallback(session):
+                if not await self._is_inbound_isolated_for_barge_in_fallback(
+                    session, source=source
+                ):
                     return
 
             import time
@@ -8922,11 +8991,19 @@ class Engine:
                 except Exception:
                     vad_result = None
 
-            # Energy fallback
+            # Energy fallback.  Always measure the normalized PCM that is also
+            # sent to the provider.  The enhanced VAD may inspect the raw
+            # AudioSocket wire frame; format/endian uncertainty there must not
+            # hide strong caller speech that is obvious after normalization.
             try:
-                energy = int(vad_result.energy_level) if vad_result else int(audioop.rms(pcm16, 2) if pcm16 else 0)
+                pcm_energy = int(audioop.rms(pcm16, 2) if pcm16 else 0)
             except Exception:
-                energy = 0
+                pcm_energy = 0
+            try:
+                vad_energy = int(vad_result.energy_level) if vad_result else 0
+            except Exception:
+                vad_energy = 0
+            energy = max(pcm_energy, vad_energy)
 
             frame_ms = 20
             confidence = 0.0
@@ -8958,7 +9035,19 @@ class Engine:
                 session.barge_in_candidate_ms = 0
                 return
 
-            if criteria_met >= (2 if vad_result else 1):
+            # Local AI is the only provider whose full-agent barge-in is owned
+            # entirely by this fallback.  On caller-isolated media, sustained
+            # normalized energy is authoritative for Local AI; requiring a
+            # second enhanced-VAD vote caused real speech to be ignored until
+            # the response had already ended.  Keep the conservative two-vote
+            # rule unchanged for every hosted provider.
+            local_energy_authoritative = self._get_provider_kind(provider_name) == "local"
+            qualifies = bool(
+                local_energy_authoritative
+                or vad_result is None
+                or criteria_met >= 2
+            )
+            if qualifies:
                 if int(getattr(session, "barge_in_candidate_ms", 0) or 0) == 0:
                     session.barge_start_ts = now
                 session.barge_in_candidate_ms = int(getattr(session, "barge_in_candidate_ms", 0) or 0) + frame_ms
@@ -8983,6 +9072,17 @@ class Engine:
             in_cooldown = (now - last_barge_in_ts) * 1000 < cooldown_ms if last_barge_in_ts else False
 
             min_ms = int(getattr(cfg, "min_ms", 250))
+            if local_energy_authoritative:
+                # Local full-agent speech consists of short telephony syllable
+                # bursts separated by natural sub-threshold gaps.  Reuse the
+                # already-supported local/pipeline reaction threshold so a
+                # clear one-word interruption (for example, "stop") does not
+                # have to remain continuously above the global threshold for
+                # a full quarter second.
+                local_min_ms = int(
+                    getattr(cfg, "pipeline_min_ms", 0) or min_ms
+                )
+                min_ms = max(40, min(min_ms, local_min_ms))
             should_trigger = (not in_cooldown) and (int(getattr(session, "barge_in_candidate_ms", 0) or 0) >= min_ms)
             if not should_trigger:
                 return
@@ -9122,6 +9222,32 @@ class Engine:
                 )
                 return
 
+            provider = (getattr(self, "_call_providers", {}) or {}).get(call_id)
+            local_provider_notified = False
+            local_turn_interrupted = bool(
+                getattr(session, "tts_playing", False)
+                or call_id in (getattr(self, "_agent_output_active_calls", set()) or set())
+            )
+
+            # Notify Local AI before platform cleanup.  stop_streaming_playback
+            # can spend time draining/cancelling pacer tasks; delaying this
+            # control message kept Whisper suppressed and allowed the caller's
+            # replacement command to be fragmented or lost.  The rollback flag
+            # also removes the interrupted exchange from weak-model history.
+            if isinstance(provider, LocalProvider):
+                try:
+                    await provider.notify_barge_in(
+                        call_id,
+                        rollback_assistant=local_turn_interrupted,
+                    )
+                    local_provider_notified = True
+                except Exception:
+                    logger.debug(
+                        "Failed early Local AI barge-in notification",
+                        call_id=call_id,
+                        exc_info=True,
+                    )
+
             # Stop/flush streaming playback first (prevents tail audio).
             # Mark end_reason so cleanup skips remainder flush (avoids oversized RTP packets).
             playback_position_ms = 0
@@ -9145,7 +9271,6 @@ class Engine:
             except Exception:
                 logger.debug("Failed to clear provider stream buffers during barge-in", call_id=call_id, exc_info=True)
 
-            provider = (getattr(self, "_call_providers", {}) or {}).get(call_id)
             # Provider-side egress may be several seconds ahead of telephony playback.
             # A local VAD interruption must flush that buffer too, otherwise the old
             # response immediately creates a new platform stream after the local stop.
@@ -9235,8 +9360,11 @@ class Engine:
             # is captured without requiring a second attempt.
             try:
                 provider = (getattr(self, "_call_providers", {}) or {}).get(call_id)
-                if isinstance(provider, LocalProvider):
-                    await provider.notify_barge_in(call_id)
+                if isinstance(provider, LocalProvider) and not local_provider_notified:
+                    await provider.notify_barge_in(
+                        call_id,
+                        rollback_assistant=local_turn_interrupted,
+                    )
             except Exception:
                 logger.debug("Failed to notify local provider about barge-in", call_id=call_id, exc_info=True)
 
@@ -10394,6 +10522,31 @@ class Engine:
                 chunk: bytes = event.get("data") or b""
                 if not chunk:
                     return
+                source_mode = str(event.get("source_mode") or "").strip().lower()
+                local_farewell_pending = getattr(self, "_local_tts_farewell_pending", set())
+                is_local_farewell_audio = (
+                    source_mode == "tool_result" and call_id in local_farewell_pending
+                )
+                if is_local_farewell_audio:
+                    local_farewell_pending.discard(call_id)
+                    # Barge-in suppression belongs to the interrupted response,
+                    # not the terminal farewell that follows it.
+                    try:
+                        sup = session.vad_state.get("output_suppression") or {}
+                        sup["active"] = False
+                        sup["until_ts"] = 0.0
+                        session.vad_state["output_suppression"] = sup
+                    except Exception:
+                        logger.debug(
+                            "Failed clearing output suppression for Local TTS farewell",
+                            call_id=call_id,
+                            exc_info=True,
+                        )
+                    logger.info(
+                        "Local TTS farewell audio started",
+                        call_id=call_id,
+                        source_mode=source_mode,
+                    )
                 # If barge-in fired, suppress provider audio locally for a short window so streaming
                 # doesn't immediately restart with the remainder of the previous sentence.
                 try:
@@ -11045,11 +11198,20 @@ class Engine:
                             await self._commit_pending_deferred_transfer_for_call(call_id, session)
                             return
                         if session and getattr(session, 'cleanup_after_tts', False):
-                            logger.info("🔚 Cleanup after TTS requested - draining terminal audio", call_id=call_id)
-                            await self._terminate_call_after_audio(
-                                call_id,
-                                reason="cleanup_after_tts",
-                            )
+                            pending = getattr(self, "_local_tts_farewell_pending", set())
+                            if call_id in pending:
+                                logger.info(
+                                    "Ignoring pre-farewell AgentAudioDone",
+                                    call_id=call_id,
+                                    reason="local_tts_farewell_pending",
+                                )
+                            else:
+                                logger.info("🔚 Cleanup after TTS requested - draining terminal audio", call_id=call_id)
+                                await self._terminate_call_after_audio(
+                                    call_id,
+                                    reason="cleanup_after_tts",
+                                    call_outcome="agent_hangup",
+                                )
                     except Exception as e:
                         logger.debug("Error checking cleanup_after_tts flag", call_id=call_id, error=str(e))
             
@@ -11216,7 +11378,11 @@ class Engine:
                             
                             # Get farewell mode from config
                             providers_cfg = getattr(self.config, "providers", {}) or {}
-                            local_config = providers_cfg.get("local") if isinstance(providers_cfg, dict) else None
+                            local_config = None
+                            if isinstance(providers_cfg, dict):
+                                local_config = providers_cfg.get(provider_name)
+                                if local_config is None:
+                                    local_config = providers_cfg.get("local")
                             farewell_mode, farewell_timeout = self._resolve_local_farewell_settings(local_config)
                             
                             logger.info(
@@ -11655,7 +11821,15 @@ class Engine:
                 )
                 return False
 
-    def _schedule_terminal_fallback(self, call_id: str, *, reason: str, timeout_sec: float = 15.0) -> None:
+    def _schedule_terminal_fallback(
+        self,
+        call_id: str,
+        *,
+        reason: str,
+        timeout_sec: float = 15.0,
+        call_outcome: Optional[str] = None,
+        clear_local_farewell_pending: bool = False,
+    ) -> None:
         """Bound a provider/tool terminal flow that never emits audio completion."""
         tasks = getattr(self, "_terminal_fallback_tasks", None)
         if tasks is None:
@@ -11676,9 +11850,12 @@ class Engine:
                         reason=reason,
                         timeout_sec=timeout_sec,
                     )
+                    if clear_local_farewell_pending:
+                        getattr(self, "_local_tts_farewell_pending", set()).discard(call_id)
                     await self._terminate_call_after_audio(
                         call_id,
                         reason=f"{reason}:fallback_timeout",
+                        call_outcome=call_outcome,
                     )
             except asyncio.CancelledError:
                 return
@@ -15609,9 +15786,11 @@ class Engine:
                 self._call_providers.pop(call_id, None)
             except Exception:
                 pass
-            if provider and hasattr(provider, "stop_session"):
+            if provider:
                 try:
-                    await provider.stop_session()
+                    await self._stop_call_provider_instance(
+                        call_id, provider, provider_name
+                    )
                 except Exception:
                     pass
             # HIGH-1b: a session exists by the time provider start runs, so this call
@@ -16140,7 +16319,38 @@ class Engine:
         # if its provider-global "active call" state has rolled over to a
         # newer call by the time a slow tool returns. Per CodeRabbit review
         # of PR #384 comment 3214139216.
-        if provider and hasattr(provider, 'send_tool_result'):
+        send_provider_result = self._should_send_provider_tool_result(
+            provider_name=provider_name,
+            function_name=function_name,
+            result=result,
+        )
+        if (
+            send_provider_result
+            and self._get_provider_kind(provider_name) == "local"
+            and function_name == "hangup_call"
+            and bool((result or {}).get("will_hangup"))
+        ):
+            pending = getattr(self, "_local_tts_farewell_pending", None)
+            if pending is None:
+                pending = set()
+                self._local_tts_farewell_pending = pending
+            pending.add(call_id)
+            logger.info("Armed Local TTS farewell audio boundary", call_id=call_id)
+            providers_cfg = getattr(self.config, "providers", {}) or {}
+            local_config = None
+            if isinstance(providers_cfg, dict):
+                local_config = providers_cfg.get(provider_name)
+                if local_config is None:
+                    local_config = providers_cfg.get("local")
+            _farewell_mode, farewell_timeout = self._resolve_local_farewell_settings(local_config)
+            self._schedule_terminal_fallback(
+                call_id,
+                reason=f"{provider_name}:local_tts_farewell_pending",
+                timeout_sec=farewell_timeout,
+                call_outcome="agent_hangup",
+                clear_local_farewell_pending=True,
+            )
+        if provider and hasattr(provider, 'send_tool_result') and send_provider_result:
             try:
                 is_error = result.get("status") == "error"
                 # The local provider's send_tool_result accepts an optional
@@ -16186,6 +16396,12 @@ class Engine:
                     function_name=function_name,
                     error=str(e),
                 )
+        elif provider and hasattr(provider, 'send_tool_result'):
+            logger.info(
+                "Skipping redundant Local AI hangup result for Asterisk farewell",
+                call_id=call_id,
+                function_name=function_name,
+            )
         
         return result
 
