@@ -35,8 +35,8 @@ Run these commands from your actual checkout path. Do not assume it is `/root/..
 ```bash
 cd /path/to/AVA-AI-Voice-Agent-for-Asterisk
 git status --short
-git diff > ../aava-pre-v740-working-tree.patch
-git diff --cached > ../aava-pre-v740-staged.patch
+git diff --binary > ../aava-pre-v740-working-tree.patch
+git diff --binary --cached > ../aava-pre-v740-staged.patch
 ```
 
 Back up at least:
@@ -80,29 +80,236 @@ The Admin UI path is **System → Updates**. Preview the plan, select **Retain l
 changes**, **Overwrite local changes**, or **Abort**, then proceed. Use a published tag
 for production; untagged branches belong on development systems only.
 
-#### Required recovery path for v7.3.0–v7.3.3 ([#518](https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/issues/518))
+#### Update planner recovery, including issue [#518](https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/issues/518)
 
-Some older installations can show only `Failed to compute update plan`. The common
-causes are a stale cached updater image, older updater ownership, or tracked local edits
-that the old UI did not surface. Bootstrap the *target release CLI* first so planning and
-execution use the fixed updater:
+Older installations, and checkouts with ownership left over from an older root-run
+update, can show `Failed to compute update plan`. Fixed Admin UI releases print the
+updater's exact stderr followed by host-CLI recovery commands. The common causes are a
+stale cached updater image, mixed checkout/`.git` ownership, a checkout mounted below
+`/root` that the updater's non-root user cannot traverse, or tracked local edits that the
+old UI did not surface.
+
+Bootstrap the *target release CLI* first so recovery does not depend on the failing UI
+planner container:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/main/scripts/install-cli.sh \
-  | sudo env AGENT_VERSION=v7.4.0 INSTALL_DIR=/usr/local/bin bash
+(
+  set -o pipefail
+  curl -sSL https://raw.githubusercontent.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/main/scripts/install-cli.sh \
+    | sudo env AGENT_VERSION=v7.4.0 INSTALL_DIR=/usr/local/bin bash
+) || { echo "Failed to install requested agent CLI; update not attempted" >&2; exit 2; }
 
-agent version
+sudo /usr/local/bin/agent version || {
+  echo "Installed agent CLI is not runnable; update not attempted" >&2
+  exit 2
+}
 git fetch origin --prune --tags
-agent update --ref v7.4.0 --include-ui --local-changes=retain
+/usr/local/bin/agent update --ref v7.4.0 --include-ui --local-changes=retain \
+  --self-update=false
 ```
 
 Use `overwrite` only after the patch/backup step above confirms you do not need the
-tracked edits. If Git reports dubious ownership, add only this checkout as safe using
-the path printed by Git:
+tracked edits.
+
+For `main` or an advanced branch target, do not substitute the latest published CLI:
+branch updater behavior can be newer than the latest release. The recovery commands
+shown by the fixed Admin UI resolve the deployment checkout's actual `origin`, clone the
+exact selected ref into a temporary directory, build its CLI with the project's Go 1.22
+container, install that binary at `/usr/local/bin/agent`, and fail closed if origin
+resolution, fetch, build, installation, or cleanup fails. This supports branches hosted
+on the operator's fork or private origin instead of assuming the public upstream. If
+Docker or Git cannot perform that exact-ref bootstrap, select a published release tag
+or repair the host prerequisites; do not continue with an older CLI.
+
+If the exact UI error contains either of these messages:
+
+```text
+mkdir: cannot create directory '/root': Permission denied
+error: cannot open '.git/FETCH_HEAD': Permission denied
+```
+
+run the recovery from an SSH shell on the host. The privileged steps repair only the
+bounded Git/updater metadata, then the update runs as the checkout owner. This bypasses
+the short-lived updater container's `/root` traversal problem without recursively
+changing checkout ownership:
+
+```bash
+AAVA_REPO=/path/to/AVA-AI-Voice-Agent-for-Asterisk
+AAVA_RECOVERY_PATCH="$(dirname "$AAVA_REPO")/aava-update-recovery.patch"
+sudo git -c safe.directory="$AAVA_REPO" -C "$AAVA_REPO" status --short || {
+  echo "Failed to inspect checkout changes; update not attempted" >&2
+  exit 2
+}
+(
+  set -o pipefail
+  sudo git -c safe.directory="$AAVA_REPO" -C "$AAVA_REPO" diff --binary --cached \
+    | sudo tee "$AAVA_RECOVERY_PATCH" >/dev/null
+) || { echo "Failed to preserve staged tracked edits; update not attempted" >&2; exit 2; }
+(
+  set -o pipefail
+  sudo git -c safe.directory="$AAVA_REPO" -C "$AAVA_REPO" diff --binary \
+    | sudo tee -a "$AAVA_RECOVERY_PATCH" >/dev/null
+) || { echo "Failed to preserve unstaged tracked edits; update not attempted" >&2; exit 2; }
+
+(
+  set -o pipefail
+  curl -sSL https://raw.githubusercontent.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/main/scripts/install-cli.sh \
+    | sudo env AGENT_VERSION=v7.4.0 INSTALL_DIR=/usr/local/bin bash
+) || { echo "Failed to install requested agent CLI; update not attempted" >&2; exit 2; }
+
+sudo /usr/local/bin/agent version || {
+  echo "Installed agent CLI is not runnable; update not attempted" >&2
+  exit 2
+}
+AAVA_UID="$(sudo stat -c '%u' "$AAVA_REPO")" || {
+  echo "Failed to read checkout owner UID; update not attempted" >&2
+  exit 2
+}
+AAVA_GID="$(sudo stat -c '%g' "$AAVA_REPO")" || {
+  echo "Failed to read checkout owner GID; update not attempted" >&2
+  exit 2
+}
+if sudo test -L "$AAVA_REPO/.git" || ! sudo test -d "$AAVA_REPO/.git"; then
+  echo "Refusing automatic repair for linked, symlinked, or missing .git metadata; inspect ownership manually" >&2
+  exit 2
+fi
+AAVA_EXPECTED_GIT_DIR="$(sudo realpath -e "$AAVA_REPO/.git")" || exit 2
+AAVA_GIT_DIR="$(sudo git -c safe.directory="$AAVA_REPO" -C "$AAVA_REPO" rev-parse --absolute-git-dir)" || exit 2
+AAVA_GIT_COMMON_DIR="$(sudo git -c safe.directory="$AAVA_REPO" -C "$AAVA_REPO" rev-parse --path-format=absolute --git-common-dir)" || exit 2
+if [ "$AAVA_GIT_DIR" != "$AAVA_EXPECTED_GIT_DIR" ] || [ "$AAVA_GIT_COMMON_DIR" != "$AAVA_EXPECTED_GIT_DIR" ]; then
+  printf 'Refusing Git metadata repair outside %s (gitdir=%s common=%s)\n' \
+    "$AAVA_EXPECTED_GIT_DIR" "$AAVA_GIT_DIR" "$AAVA_GIT_COMMON_DIR" >&2
+  exit 2
+fi
+sudo chown -R --no-dereference "$AAVA_UID:$AAVA_GID" "$AAVA_EXPECTED_GIT_DIR" || exit 2
+if sudo test -L "$AAVA_REPO/.agent"; then
+  echo "Refusing symlinked .agent state" >&2
+  exit 2
+fi
+if sudo test -e "$AAVA_REPO/.agent"; then
+  if ! sudo test -d "$AAVA_REPO/.agent"; then
+    echo "Refusing non-directory .agent state" >&2
+    exit 2
+  fi
+  sudo chown -R --no-dereference "$AAVA_UID:$AAVA_GID" "$AAVA_REPO/.agent" || {
+    echo "Failed to repair .agent ownership; update not attempted" >&2
+    exit 2
+  }
+fi
+AAVA_SETPRIV="$(command -v setpriv)" || {
+  echo "setpriv is required; install util-linux and retry" >&2
+  exit 2
+}
+AAVA_GROUPS="$(sudo -u "#$AAVA_UID" -g "#$AAVA_GID" id -G 2>/dev/null | tr ' ' ',')" \
+  || AAVA_GROUPS="$AAVA_GID"
+AAVA_GROUPS="${AAVA_GROUPS:-$AAVA_GID}"
+if sudo test -S /var/run/docker.sock; then
+  AAVA_DOCKER_GID="$(sudo stat -c '%g' /var/run/docker.sock)" || exit 2
+  case ",${AAVA_GROUPS}," in
+    *,"${AAVA_DOCKER_GID}",*) ;;
+    *) AAVA_GROUPS="${AAVA_GROUPS},${AAVA_DOCKER_GID}" ;;
+  esac
+fi
+(
+  AAVA_TRAVERSAL_STATE="$(mktemp)" || exit 2
+  aava_restore_traversal() {
+    AAVA_RESTORE_STATUS=0
+    while IFS="$(printf '\t')" read -r AAVA_MODE AAVA_PARENT; do
+      if [ -n "$AAVA_PARENT" ]; then
+        sudo chmod "$AAVA_MODE" -- "$AAVA_PARENT" || AAVA_RESTORE_STATUS=2
+      fi
+    done < "$AAVA_TRAVERSAL_STATE"
+    rm -f -- "$AAVA_TRAVERSAL_STATE"
+    return "$AAVA_RESTORE_STATUS"
+  }
+  trap 'AAVA_EXIT=$?; aava_restore_traversal || AAVA_EXIT=$?; exit "$AAVA_EXIT"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  AAVA_PARENT="$(dirname "$AAVA_REPO")"
+  while [ "$AAVA_PARENT" != "/" ]; do
+    if ! sudo "$AAVA_SETPRIV" --reuid="$AAVA_UID" --regid="$AAVA_GID" \
+      --groups="$AAVA_GROUPS" test -x "$AAVA_PARENT"; then
+      AAVA_MODE="$(sudo stat -c '%a' "$AAVA_PARENT")" || exit 2
+      printf '%s\t%s\n' "$AAVA_MODE" "$AAVA_PARENT" >> "$AAVA_TRAVERSAL_STATE" || exit 2
+      sudo chmod o+x -- "$AAVA_PARENT" || exit 2
+    fi
+    AAVA_PARENT="$(dirname "$AAVA_PARENT")"
+  done
+  sudo "$AAVA_SETPRIV" --reuid="$AAVA_UID" --regid="$AAVA_GID" \
+    --groups="$AAVA_GROUPS" /bin/sh -c 'cd "$1" && shift && exec "$@"' \
+    sh "$AAVA_REPO" /usr/local/bin/agent update --ref v7.4.0 --include-ui \
+    --local-changes=retain --self-update=false
+)
+```
+
+Do not recursively `chown` the checkout: production checkouts can legitimately contain
+runtime files owned by Asterisk or another service account. The recovery above repairs
+only `.git` and `.agent`, which are owned by the checkout operator. The `setpriv` call
+uses the checkout owner's group vector and explicitly includes the Docker socket GID,
+so Docker access does not depend on which sudoer pasted the recovery. Patch capture
+and CLI bootstrap fail closed before any repair or update if Git cannot inspect the
+checkout or read either diff, the filesystem cannot write the preservation file, the
+checkout owner cannot be determined, or the requested CLI cannot be downloaded,
+installed, and executed. Metadata repair also stops recovery immediately if either
+bounded ownership change fails. Patch capture includes binary payloads, and the guarded
+update disables CLI self-update so it keeps the requested recovery version. Repository
+ancestors that the checkout owner cannot traverse receive execute-only access inside a
+guarded subshell; the owner-level command enters `AAVA_REPO` only after that repair, and
+the exact original modes are restored on success, failure, or interruption. The early
+inspection and patch commands use privileged absolute paths, so
+they do not require the sudoer to traverse `/root` before the guard is active. If Git
+metadata resolves outside the checkout's real `.git` directory (including a linked
+worktree or gitfile), recovery prints the resolved paths and stops before `chown`;
+inspect and repair that shared metadata manually rather than changing another
+repository recursively. If Git instead reports *dubious ownership*, add only this
+checkout as safe using the path
+printed by Git; `safe.directory` does not fix a real write-permission failure:
 
 ```bash
 git config --global --add safe.directory "$(pwd)"
+
+# Use the same identity that will run the recovery command. If that is root:
+sudo git config --global --add safe.directory "$(pwd)"
 ```
+
+#### If the host `agent` CLI recovery also fails
+
+First confirm that the command being executed is the newly bootstrapped CLI, not an
+older binary earlier in `PATH`:
+
+```bash
+command -v agent || true
+/usr/local/bin/agent version
+```
+
+Use the exact failure to choose the next safe action:
+
+| CLI output | Recovery |
+|---|---|
+| `unknown flag: --local-changes` | The old CLI is still running. Repeat the target-release install command above and invoke `/usr/local/bin/agent` by absolute path. |
+| `detected dubious ownership` | Add only the current checkout to `safe.directory` for the same user that runs `agent`; this is a trust check, not a permissions repair. |
+| `.git/FETCH_HEAD: Permission denied` or another `.git` write failure | Preserve the patch, then rerun the guarded checkout-owner recovery block above. Do not run the CLI directly as root or recursively change ownership. |
+| `working tree has local changes` or `local-change policy` | Re-run with an explicit `--local-changes=retain`, `overwrite`, or `abort`; use `retain` unless the tracked edits are already preserved and intentionally disposable. |
+| merge, index, or stash conflict | Follow the conflict procedure below before retrying. Do not delete the stash or use `git reset --hard`. |
+| Docker image or Compose failure | Keep the updater backup and follow the service-specific recovery below; do not delete operator databases. |
+
+To capture the full CLI error for support or an issue without losing its exit status,
+set the log path and `pipefail`, then replace the final `agent update` command inside the
+guarded subshell above with this equivalent pipeline:
+
+```bash
+AAVA_RECOVERY_LOG="$(dirname "$AAVA_REPO")/aava-update-recovery.log"
+set -o pipefail
+sudo "$AAVA_SETPRIV" --reuid="$AAVA_UID" --regid="$AAVA_GID" \
+  --groups="$AAVA_GROUPS" /bin/sh -c 'cd "$1" && shift && exec "$@"' \
+  sh "$AAVA_REPO" /usr/local/bin/agent update --ref v7.4.0 --include-ui \
+  --local-changes=retain --self-update=false 2>&1 | sudo tee "$AAVA_RECOVERY_LOG"
+```
+
+The CLI creates its backup before changing the checkout. If the command reports a
+backup path or a preserved stash, include those paths in the support report but do not
+upload `.env`, database files, credentials, or other secrets.
 
 #### If an earlier update left a merge or stash conflict
 

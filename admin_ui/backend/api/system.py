@@ -4483,7 +4483,15 @@ def _run_updater_ephemeral(
             status = 124
 
         try:
+            # Successful plan responses must remain stdout-only because stdout is JSON.
+            # On failure, stderr is the actionable diagnostic and must not be discarded.
             logs = (container.logs(stdout=True, stderr=capture_stderr) or b"").decode("utf-8", errors="replace")
+            if status != 0 and not capture_stderr:
+                stderr_logs = (container.logs(stdout=False, stderr=True) or b"").decode(
+                    "utf-8", errors="replace"
+                )
+                if stderr_logs:
+                    logs = f"{logs.rstrip()}\n{stderr_logs}" if logs.strip() else stderr_logs
         except Exception as log_err:
             logs = f"[updater] Failed to read logs: {_sanitize_for_log(str(log_err))}"
 
@@ -4557,6 +4565,179 @@ def _select_latest_v_tag(ls_remote_text: str) -> Optional[dict]:
     if best and best.get("sha"):
         return best
     return None
+
+
+def _update_plan_failure_detail(
+    *,
+    host_root: str,
+    ref: str,
+    include_ui: bool,
+    checkout: bool,
+    updater_output: str,
+) -> str:
+    """Build an actionable plan error without polluting successful plan JSON."""
+    import shlex
+
+    output = (updater_output or "Updater exited without an error message").strip()
+    quoted_root = shlex.quote(host_root)
+    quoted_ref = shlex.quote(ref)
+    release_ref = (ref or "").strip()
+    if _is_semver_tag(release_ref):
+        release_tag = release_ref if release_ref.startswith("v") else f"v{release_ref}"
+        version_env = f"AGENT_VERSION={shlex.quote(release_tag)} "
+        cli_bootstrap = (
+            "(\n"
+            "  set -o pipefail\n"
+            "  curl -sSL https://raw.githubusercontent.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/main/scripts/install-cli.sh \\\n"
+            f"    | sudo env {version_env}INSTALL_DIR=/usr/local/bin bash\n"
+            ') || { echo "Failed to install requested agent CLI; update not attempted" '
+            ">&2; exit 2; }\n"
+        )
+    else:
+        cli_bootstrap = (
+            f"AAVA_CLI_REF={quoted_ref}\n"
+            'AAVA_CLI_SRC="$(mktemp -d)" || { echo "Failed to create temporary CLI '
+            'build directory; update not attempted" >&2; exit 2; }\n'
+            "aava_cleanup_cli_source() { sudo rm -rf -- \"$AAVA_CLI_SRC\"; }\n"
+            "trap 'aava_cleanup_cli_source' EXIT\n"
+            "trap 'exit 129' HUP\n"
+            "trap 'exit 130' INT\n"
+            "trap 'exit 143' TERM\n"
+            'AAVA_CLI_REMOTE="$(sudo git -c safe.directory="$AAVA_REPO" '
+            '-C "$AAVA_REPO" remote get-url origin)" || { echo "Failed to resolve '
+            'checkout origin for CLI source; update not attempted" >&2; exit 2; }\n'
+            'git clone --quiet --depth 1 --single-branch --branch "$AAVA_CLI_REF" '
+            '-- "$AAVA_CLI_REMOTE" '
+            '"$AAVA_CLI_SRC/repo" || { echo "Failed to fetch selected CLI source; '
+            'update not attempted" >&2; exit 2; }\n'
+            'mkdir -p "$AAVA_CLI_SRC/out" || exit 2\n'
+            'sudo docker run --rm -v "$AAVA_CLI_SRC/repo/cli:/src:ro" '
+            '-v "$AAVA_CLI_SRC/out:/out" -w /src -e HOME=/tmp '
+            '-e GOCACHE=/tmp/go-build -e GOMODCACHE=/tmp/go-mod '
+            '-e AAVA_CLI_VERSION="$AAVA_CLI_REF" golang:1.22-bookworm '
+            "bash -c 'go mod download && CGO_ENABLED=0 go build -buildvcs=false "
+            '-ldflags "-X main.version=$AAVA_CLI_VERSION" -o /out/agent ./cmd/agent\' '
+            '|| { echo "Failed to build CLI from selected ref; update not attempted" '
+            ">&2; exit 2; }\n"
+            'sudo install -m 0755 "$AAVA_CLI_SRC/out/agent" /usr/local/bin/agent '
+            '|| { echo "Failed to install selected-ref CLI; update not attempted" '
+            ">&2; exit 2; }\n"
+            'aava_cleanup_cli_source || { echo "Failed to clean temporary CLI source" '
+            ">&2; exit 2; }\n"
+            "trap - EXIT HUP INT TERM\n"
+        )
+    checkout_flag = "true" if checkout else "false"
+    include_ui_flag = "true" if include_ui else "false"
+
+    return (
+        "Failed to compute update plan.\n\n"
+        "Updater error:\n"
+        f"{output}\n\n"
+        "Recovery (run these commands in a host SSH shell):\n"
+        f"AAVA_REPO={quoted_root}\n"
+        'AAVA_RECOVERY_PATCH="$(dirname "$AAVA_REPO")/aava-update-recovery.patch"\n'
+        'sudo git -c safe.directory="$AAVA_REPO" -C "$AAVA_REPO" status --short '
+        '|| { echo "Failed to inspect checkout changes; update not attempted" >&2; exit 2; }\n'
+        "(\n"
+        "  set -o pipefail\n"
+        '  sudo git -c safe.directory="$AAVA_REPO" -C "$AAVA_REPO" diff --binary --cached '
+        '| sudo tee "$AAVA_RECOVERY_PATCH" >/dev/null\n'
+        ') || { echo "Failed to preserve staged tracked edits; update not attempted" '
+        ">&2; exit 2; }\n"
+        "(\n"
+        "  set -o pipefail\n"
+        '  sudo git -c safe.directory="$AAVA_REPO" -C "$AAVA_REPO" diff --binary '
+        '| sudo tee -a "$AAVA_RECOVERY_PATCH" >/dev/null\n'
+        ') || { echo "Failed to preserve unstaged tracked edits; update not attempted" '
+        ">&2; exit 2; }\n"
+        f"{cli_bootstrap}"
+        'sudo /usr/local/bin/agent version || { echo "Installed agent CLI is not '
+        'runnable; update not attempted" >&2; exit 2; }\n'
+        'AAVA_UID="$(sudo stat -c \'%u\' "$AAVA_REPO")" || { '
+        'echo "Failed to read checkout owner UID; update not attempted" >&2; exit 2; }\n'
+        'AAVA_GID="$(sudo stat -c \'%g\' "$AAVA_REPO")" || { '
+        'echo "Failed to read checkout owner GID; update not attempted" >&2; exit 2; }\n'
+        'if sudo test -L "$AAVA_REPO/.git" || ! sudo test -d "$AAVA_REPO/.git"; then\n'
+        '  echo "Refusing automatic repair for linked, symlinked, or missing .git '
+        'metadata; inspect ownership manually" >&2\n'
+        "  exit 2\n"
+        "fi\n"
+        'AAVA_EXPECTED_GIT_DIR="$(sudo realpath -e "$AAVA_REPO/.git")" || exit 2\n'
+        'AAVA_GIT_DIR="$(sudo git -c safe.directory="$AAVA_REPO" -C "$AAVA_REPO" '
+        'rev-parse --absolute-git-dir)" || exit 2\n'
+        'AAVA_GIT_COMMON_DIR="$(sudo git -c safe.directory="$AAVA_REPO" -C "$AAVA_REPO" '
+        'rev-parse --path-format=absolute --git-common-dir)" || exit 2\n'
+        'if [ "$AAVA_GIT_DIR" != "$AAVA_EXPECTED_GIT_DIR" ] || '
+        '[ "$AAVA_GIT_COMMON_DIR" != "$AAVA_EXPECTED_GIT_DIR" ]; then\n'
+        '  printf \'Refusing Git metadata repair outside %s (gitdir=%s common=%s)\\n\' '
+        '"$AAVA_EXPECTED_GIT_DIR" "$AAVA_GIT_DIR" "$AAVA_GIT_COMMON_DIR" >&2\n'
+        "  exit 2\n"
+        "fi\n"
+        'sudo chown -R --no-dereference "$AAVA_UID:$AAVA_GID" '
+        '"$AAVA_EXPECTED_GIT_DIR" || exit 2\n'
+        'if sudo test -L "$AAVA_REPO/.agent"; then\n'
+        '  echo "Refusing symlinked .agent state" >&2\n'
+        '  exit 2\n'
+        'fi\n'
+        'if sudo test -e "$AAVA_REPO/.agent"; then\n'
+        '  if ! sudo test -d "$AAVA_REPO/.agent"; then\n'
+        '    echo "Refusing non-directory .agent state" >&2\n'
+        '    exit 2\n'
+        '  fi\n'
+        '  sudo chown -R --no-dereference "$AAVA_UID:$AAVA_GID" '
+        '"$AAVA_REPO/.agent" || { echo "Failed to repair .agent ownership; '
+        'update not attempted" >&2; exit 2; }\n'
+        "fi\n"
+        'AAVA_SETPRIV="$(command -v setpriv)" || { '
+        'echo "setpriv is required; install util-linux and retry" >&2; exit 2; }\n'
+        'AAVA_GROUPS="$(sudo -u "#$AAVA_UID" -g "#$AAVA_GID" id -G 2>/dev/null '
+        '| tr \' \' \',\')" || AAVA_GROUPS="$AAVA_GID"\n'
+        'AAVA_GROUPS="${AAVA_GROUPS:-$AAVA_GID}"\n'
+        'if sudo test -S /var/run/docker.sock; then\n'
+        '  AAVA_DOCKER_GID="$(sudo stat -c \'%g\' /var/run/docker.sock)" || exit 2\n'
+        '  case ",${AAVA_GROUPS}," in\n'
+        '    *,"${AAVA_DOCKER_GID}",*) ;;\n'
+        '    *) AAVA_GROUPS="${AAVA_GROUPS},${AAVA_DOCKER_GID}" ;;\n'
+        "  esac\n"
+        "fi\n"
+        "(\n"
+        '  AAVA_TRAVERSAL_STATE="$(mktemp)" || exit 2\n'
+        "  aava_restore_traversal() {\n"
+        "    AAVA_RESTORE_STATUS=0\n"
+        '    while IFS="$(printf \'\\t\')" read -r AAVA_MODE AAVA_PARENT; do\n'
+        '      if [ -n "$AAVA_PARENT" ]; then\n'
+        '        sudo chmod "$AAVA_MODE" -- "$AAVA_PARENT" || AAVA_RESTORE_STATUS=2\n'
+        "      fi\n"
+        '    done < "$AAVA_TRAVERSAL_STATE"\n'
+        '    rm -f -- "$AAVA_TRAVERSAL_STATE"\n'
+        '    return "$AAVA_RESTORE_STATUS"\n'
+        "  }\n"
+        '  trap \'AAVA_EXIT=$?; aava_restore_traversal || AAVA_EXIT=$?; exit "$AAVA_EXIT"\' EXIT\n'
+        "  trap 'exit 129' HUP\n"
+        "  trap 'exit 130' INT\n"
+        "  trap 'exit 143' TERM\n"
+        '  AAVA_PARENT="$(dirname "$AAVA_REPO")"\n'
+        '  while [ "$AAVA_PARENT" != "/" ]; do\n'
+        '    if ! sudo "$AAVA_SETPRIV" --reuid="$AAVA_UID" --regid="$AAVA_GID" '
+        '--groups="$AAVA_GROUPS" test -x "$AAVA_PARENT"; then\n'
+        '      AAVA_MODE="$(sudo stat -c \'%a\' "$AAVA_PARENT")" || exit 2\n'
+        '      printf \'%s\\t%s\\n\' "$AAVA_MODE" "$AAVA_PARENT" '
+        '>> "$AAVA_TRAVERSAL_STATE" || exit 2\n'
+        '      sudo chmod o+x -- "$AAVA_PARENT" || exit 2\n'
+        "    fi\n"
+        '    AAVA_PARENT="$(dirname "$AAVA_PARENT")"\n'
+        "  done\n"
+        f"  sudo \"$AAVA_SETPRIV\" --reuid=\"$AAVA_UID\" --regid=\"$AAVA_GID\" "
+        f"--groups=\"$AAVA_GROUPS\" /bin/sh -c "
+        f"'cd \"$1\" && shift && exec \"$@\"' sh \"$AAVA_REPO\" "
+        f"/usr/local/bin/agent update --ref {quoted_ref} "
+        f"--checkout={checkout_flag} "
+        f"--include-ui={include_ui_flag} --local-changes=retain --self-update=false\n"
+        ")\n\n"
+        "Use --local-changes=overwrite only after preserving any local source edits. "
+        "Only .git/.agent metadata is repaired, and temporary parent traversal is restored; "
+        "do not recursively chown the checkout."
+    )
 
 
 class UpdateStatusResponse(BaseModel):
@@ -4981,7 +5162,16 @@ async def updates_plan(
         allow_build=True,
     )
     if code != 0:
-        raise HTTPException(status_code=500, detail=f"Failed to compute update plan: {out.strip()[:400]}")
+        raise HTTPException(
+            status_code=500,
+            detail=_update_plan_failure_detail(
+                host_root=host_root,
+                ref=ref,
+                include_ui=include_ui,
+                checkout=checkout,
+                updater_output=out,
+            ),
+        )
 
     import json
     try:
