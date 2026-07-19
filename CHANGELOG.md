@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.4.1] - 2026-07-18
+
 ### Fixed
 
 - **Outbound campaign correctness, simpler lead intake, and v7 Agent alignment** ([#538](https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/issues/538), `src/engine.py`, Call Scheduling): scheduled calls now hydrate `{called_number}` with the lead/customer number, active HUMAN sessions are not double-counted against campaign concurrency, malformed timezones/windows fail closed and block campaign start, and startup/runtime stale-attempt cleanup shares one validated timeout. Outbound channels use canonical `AI_AGENT` while retaining `AI_CONTEXT` compatibility; the sample CSV and UI now teach the active-Agent `agent` column while legacy `context` imports remain accepted. Lead intake now supports bounded `.xlsx` uploads and manual entry in addition to CSV, with all three paths sharing the existing validation, Agent/timezone fallback, and duplicate handling.
@@ -2222,7 +2224,8 @@ Version 4.1 introduces **unified tool calling architecture** enabling AI agents 
 - **v4.0.0** (2025-10-29) - Modular pipeline architecture, production monitoring, golden baselines
 - **v3.0.0** (2025-09-16) - Modular pipeline architecture, file based playback
 
-[Unreleased]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.4.0...HEAD
+[Unreleased]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.4.1...HEAD
+[7.4.1]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.4.0...v7.4.1
 [7.4.0]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.3.5...v7.4.0
 [7.3.5]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.3.4...v7.3.5
 [7.3.4]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.3.3...v7.3.4

@@ -6,7 +6,7 @@
   <img alt="Asterisk AI Voice Agent" src="assets/banner_light_mode.png?v=9" width="100%">
 </picture>
 
-![Version](https://img.shields.io/badge/version-7.4.0-blue.svg)
+![Version](https://img.shields.io/badge/version-7.4.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![Docker](https://img.shields.io/badge/docker-compose-blue.svg)
@@ -167,6 +167,36 @@ docker compose -p asterisk-ai-voice-agent logs -f ai_engine
 ## 🎉 What's New
 
 <details open>
+<summary><b>v7.4.1 — Reliable, simpler outbound calling 📞</b></summary>
+
+**Outbound campaigns are easier to prepare, safer to schedule, and much easier
+to troubleshoot from the Admin UI.**
+
+- **Simpler lead intake** — import validated CSV or Excel `.xlsx` files, or add
+  individual leads manually. Samples and new campaigns use the canonical
+  `AI_AGENT`/`agent` routing model while legacy `AI_CONTEXT`/`context` inputs
+  remain compatible.
+- **Safer campaign scheduling** — scheduled calls consistently receive the lead's
+  called number, malformed timezone or calling-window settings fail closed,
+  campaign concurrency is counted correctly, and stale attempts recover through
+  one validated timeout policy.
+- **More reliable human handling** — human-first AMD defaults reduce false
+  voicemail classification, and terminal farewell/hangup handling prevents new
+  caller input from reviving a call that is already ending.
+- **Better HTTP-tool workflows** — pre-call, in-call, and post-call HTTP tools
+  enforce method/body compatibility; pre-call output variables remain available
+  for enriched greetings; and bounded, sanitized tool responses and diagnostics
+  are visible in Call History and Scheduling.
+- **Safer upgrades** — updater recovery now handles older Git installations,
+  Docker Compose access after privilege drops, and mixed-ownership checkouts more
+  predictably without sacrificing local tracked changes.
+
+See the [Outbound Calling guide](docs/OUTBOUND_CALLING.md) and
+[v7.4.1 changelog](CHANGELOG.md#741---2026-07-18) for details.
+
+</details>
+
+<details>
 <summary><b>v7.4.0 — Agent-scoped tools and Agent-only routing 🧰</b></summary>
 
 **Each Agent can now receive only the transfer destinations, calendars, and
