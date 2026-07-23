@@ -6,7 +6,7 @@
   <img alt="Asterisk AI Voice Agent" src="assets/banner_light_mode.png?v=9" width="100%">
 </picture>
 
-![Version](https://img.shields.io/badge/version-7.4.1-blue.svg)
+![Version](https://img.shields.io/badge/version-7.5.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![Docker](https://img.shields.io/badge/docker-compose-blue.svg)
@@ -167,6 +167,39 @@ docker compose -p asterisk-ai-voice-agent logs -f ai_engine
 ## 🎉 What's New
 
 <details open>
+<summary><b>v7.5.0 — Enhanced telephony audio and VICIdial integration 🎧</b></summary>
+
+**v7.5.0 improves narrowband call audio without changing the established
+8 kHz Asterisk wire contract, and adds a production-oriented VICIdial Remote
+Agent integration.**
+
+- **Opt-in enhanced telephony audio** — assign `telephony_enhanced_8k` to an
+  Agent to use stateful band-limited downsampling for cleaner G.711 playback.
+  Existing profiles keep their compatibility behavior, and switching back to
+  `telephony_ulaw_8k` is the immediate rollback.
+- **Consistent provider and pipeline policy** — hosted providers and modular TTS
+  pipelines inherit the Agent's Audio Profile by default, expose narrow
+  troubleshooting overrides, and validate incompatible encoding, rate,
+  resampler, overlap, and segmentation combinations before apply.
+- **Safer interruption and teardown** — resampler state is isolated per call and
+  reset across responses, interruptions, and cleanup; replaced streams cannot
+  be removed by stale cleanup; and late pipeline output is blocked after call
+  teardown takes ownership.
+- **VICIdial Remote Agents** — VICIdial remains authoritative for campaigns,
+  customer channels, reporting, dispositions, DNC, callbacks, and transfers,
+  while AAVA supplies the mapped AI Agent with fail-closed ownership checks and
+  sanitized lifecycle evidence.
+- **More recoverable upgrades** — the host recovery script handles mixed Git
+  ownership, stale updater images, `/root` traversal constraints, and tracked
+  local edits while preserving bounded backups and exact release targeting.
+
+See the [v7.5.0 changelog](CHANGELOG.md#750---2026-07-22),
+[Audio Profiles](docs/Configuration-Reference.md#audio-profile-selection), and
+[VICIdial Remote Agent setup](docs/Vicidial-Setup.md) for details.
+
+</details>
+
+<details>
 <summary><b>v7.4.1 — Reliable, simpler outbound calling 📞</b></summary>
 
 **Outbound campaigns are easier to prepare, safer to schedule, and much easier

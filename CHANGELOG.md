@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.5.0] - 2026-07-22
+
 ### Added
 
 - **Opt-in enhanced 8 kHz telephony profile and audio-policy controls** ([#553](https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/issues/553), providers, modular pipelines, Admin UI): `telephony_enhanced_8k` keeps the established 8 kHz Asterisk wire contract while selecting a stateful band-limited 16/24 kHz-to-8 kHz converter that removes out-of-band energy before G.711 playback. Provider and modular TTS settings inherit the per-call Audio Profile by default, retain narrower compatibility/alias-safe troubleshooting overrides, and resolve without mutating shared provider state. Existing profiles remain on compatibility behavior and assigning an Agent back to `telephony_ulaw_8k` is the immediate rollback. The UI labels the enhanced profile and effective downsampling mode; pipeline TTS overlap can still be overridden without changing other pipelines, Local Whisper segmentation can be tuned per pipeline/session, and invalid resampler, segmentation, overlap, or fixed encoding/rate combinations fail config validation before apply.
