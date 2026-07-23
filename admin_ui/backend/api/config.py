@@ -20,6 +20,16 @@ from typing import Dict, Any, Optional, Union
 from urllib.parse import urlparse
 import settings
 
+try:
+    # The production Admin image copies the shared module into /app.
+    from config_apply import classify_config_change
+except ModuleNotFoundError:
+    # Source checkout/tests: import the same canonical module from root src/.
+    PROJECT_SOURCE_ROOT = Path(__file__).resolve().parents[3]
+    if str(PROJECT_SOURCE_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_SOURCE_ROOT))
+    from src.config_apply import classify_config_change
+
 # A11: Maximum number of backups to keep
 MAX_BACKUPS = 5
 
@@ -780,63 +790,60 @@ def persist_config_content(content: str) -> dict:
     # Write to LOCAL override file (keeps base ai-agent.yaml clean for git)
     _write_local_config(local_content)
 
-    # Determine recommended apply method based on what changed
-    # hot_reload: contexts, MCP servers, greetings/instructions only
-    # restart: most YAML changes (providers, pipelines, transport, VAD, etc.)
-    # recreate: .env changes (handled separately in /env endpoint)
-    recommended_method = "restart"  # Default for YAML changes
-
-    # Check if change is limited to hot-reloadable sections
-    try:
-        if old_merged:
-            # Keys that can be hot-reloaded.
-            # barge_in is read live from self.config per-call (every barge-in path
-            # does getattr(self.config, "barge_in", None)), so YAML tuning of it
-            # applies to new calls without dropping active ones (MED-R1).
-            # vad is NOT hot-reloadable: EnhancedVADManager, webrtcvad.Vad,
-            # self._vad_mode and AudioGatingManager are built once from config.vad
-            # in Engine.__init__, and _reload_handler does not rebuild them — so a
-            # vad-only save must use the restart path to actually apply.
-            # streaming is NOT hot-reloadable for the same reason
-            # (StreamingPlaybackManager reads its params once at construction).
-            # Both kept on the restart path (bot re-review, Finding 2).
-            # no_input is resolved into an immutable per-call policy when a new
-            # session starts, so it is safe to hot-reload without changing calls
-            # already in progress.
-            hot_reload_keys = {
-                'contexts', 'profiles', 'barge_in', 'no_input',
-                # v7.4 immutable tool generations: these apply atomically to new calls.
-                'tools', 'in_call_tools', 'farewell_hangup_delay_sec',
-                'on_provider_failure', 'provider_failure_prompt',
-                'provider_failure_redirect_context',
-                'provider_failure_redirect_extension',
-                'provider_failure_redirect_priority',
-            }
-
-            # Check if only hot-reloadable keys changed
-            all_keys = set(old_merged.keys()) | set(new_parsed.keys())
-            changed_keys = set()
-            for key in all_keys:
-                if old_merged.get(key) != new_parsed.get(key):
-                    changed_keys.add(key)
-
-            if changed_keys and changed_keys.issubset(hot_reload_keys):
-                recommended_method = "hot_reload"
-    except Exception:
-        pass  # Fall back to restart if comparison fails
-
-    apply_plan = ([{"service": "ai_engine", "method": "hot_reload", "endpoint": "/api/system/containers/ai_engine/reload"}]
-                 if recommended_method == "hot_reload"
-                 else [{"service": "ai_engine", "method": "restart", "endpoint": "/api/system/containers/ai_engine/restart"}])
+    decision = classify_config_change(old_merged, new_parsed)
+    recommended_method = decision.recommended_apply_method
+    apply_plan = decision.apply_plan()
 
     return {
         "status": "success",
-        "restart_required": recommended_method != "hot_reload",
+        "apply_required": decision.apply_required,
+        "restart_required": decision.restart_required,
         "recommended_apply_method": recommended_method,
         "apply_plan": apply_plan,
-        "message": f"Configuration saved. {'Hot reload' if recommended_method == 'hot_reload' else 'Restart'} AI Engine to apply changes.",
+        "message": (
+            "Configuration saved. No runtime changes detected."
+            if recommended_method == "none"
+            else f"Configuration saved. {'Hot reload' if recommended_method == 'hot_reload' else 'Restart'} AI Engine to apply changes."
+        ),
         "warnings": warnings,
     }
+
+
+async def _fetch_engine_config_state() -> Optional[Dict[str, Any]]:
+    """Read engine-owned apply state without making config saves depend on it."""
+    import httpx
+
+    engine_url = os.getenv("AI_ENGINE_HEALTH_URL", "http://localhost:15000")
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(engine_url.rstrip("/") + "/config/state")
+        if response.status_code != 200:
+            return None
+        payload = response.json()
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        logger.debug("Engine config state unavailable after config save", exc_info=True)
+        return None
+
+
+async def reconcile_apply_result_with_engine_state(result: dict) -> dict:
+    """Overlay a pre-existing deferred restart onto save-time diff metadata."""
+    state = await _fetch_engine_config_state()
+    if not state or state.get("restart_required") is not True:
+        return result
+
+    reconciled = dict(result)
+    reconciled["restart_required"] = True
+    reconciled["recommended_apply_method"] = "restart"
+    reconciled["apply_plan"] = [{
+        "service": "ai_engine",
+        "method": "restart",
+        "endpoint": "/api/system/containers/ai_engine/restart",
+    }]
+    reconciled["message"] = (
+        "Configuration saved. Restart AI Engine to finish applying pending changes."
+    )
+    return reconciled
 
 
 @router.get("")
@@ -851,7 +858,8 @@ async def update_yaml_config(update: ConfigUpdate):
         # Persist via the shared helper (also used by the structured tools CRUD
         # API). MED-E1 email validation now lives inside persist_config_content
         # so every persistence path enforces it (not just this endpoint).
-        return persist_config_content(update.content)
+        result = persist_config_content(update.content)
+        return await reconcile_apply_result_with_engine_state(result)
     except HTTPException:
         raise
     except Exception as e:

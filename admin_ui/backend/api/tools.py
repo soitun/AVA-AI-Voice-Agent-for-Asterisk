@@ -2,7 +2,7 @@
 Tools API endpoints for testing HTTP tools before saving.
 """
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Dict, Any, Optional, List, Literal
 import httpx
 import json
@@ -1094,6 +1094,19 @@ class ManagedToolOut(BaseModel):
     enabled: bool
     is_global: bool
     config: Dict[str, Any]
+    apply_required: Optional[bool] = None
+    restart_required: Optional[bool] = None
+    recommended_apply_method: Optional[str] = None
+    apply_plan: Optional[List[Dict[str, str]]] = None
+
+
+class ManagedToolDeleteOut(BaseModel):
+    name: str
+    deleted: bool = True
+    apply_required: bool
+    restart_required: bool
+    recommended_apply_method: str
+    apply_plan: List[Dict[str, str]] = Field(default_factory=list)
 
 
 def _kind_for_phase(phase: str) -> str:
@@ -1269,12 +1282,48 @@ def _load_cfg() -> Dict[str, Any]:
     return cfg
 
 
-def _persist_cfg(cfg: Dict[str, Any]) -> dict:
+async def _persist_cfg(cfg: Dict[str, Any]) -> dict:
     content = yaml.dump(cfg, default_flow_style=False, sort_keys=False)
-    return config_api.persist_config_content(content)
+    result = config_api.persist_config_content(content)
+    return await config_api.reconcile_apply_result_with_engine_state(result)
 
 
-def _to_out(block: str, name: str, doc: Dict[str, Any]) -> ManagedToolOut:
+def _apply_metadata(result: Optional[dict]) -> Dict[str, Any]:
+    result = result or {}
+    apply_required = bool(result.get("apply_required", True))
+    restart_required = bool(result.get("restart_required", False))
+    method = str(
+        result.get("recommended_apply_method")
+        or ("restart" if restart_required else "hot_reload" if apply_required else "none")
+    )
+    raw_plan = result.get("apply_plan")
+    if raw_plan is None:
+        if method == "none":
+            raw_plan = []
+        else:
+            raw_plan = [{
+                "service": "ai_engine",
+                "method": "restart" if method == "restart" else "hot_reload",
+                "endpoint": (
+                    "/api/system/containers/ai_engine/restart"
+                    if method == "restart"
+                    else "/api/system/containers/ai_engine/reload"
+                ),
+            }]
+    return {
+        "apply_required": apply_required,
+        "restart_required": restart_required,
+        "recommended_apply_method": method,
+        "apply_plan": list(raw_plan),
+    }
+
+
+def _to_out(
+    block: str,
+    name: str,
+    doc: Dict[str, Any],
+    apply_result: Optional[dict] = None,
+) -> ManagedToolOut:
     phase = _phase_for(block, doc)
     return ManagedToolOut(
         name=name,
@@ -1284,6 +1333,7 @@ def _to_out(block: str, name: str, doc: Dict[str, Any]) -> ManagedToolOut:
         enabled=bool(doc.get("enabled", True)),
         is_global=bool(doc.get("is_global", False)),
         config=_safe_jsonable(doc),
+        **(_apply_metadata(apply_result) if apply_result is not None else {}),
     )
 
 
@@ -1312,8 +1362,8 @@ async def create_managed_tool(body: ManagedToolWrite):
         raise HTTPException(status_code=500, detail=f"Config '{block}' block is not a mapping")
     section[name] = doc
 
-    _persist_cfg(cfg)
-    return _to_out(block, name, doc)
+    apply_result = await _persist_cfg(cfg)
+    return _to_out(block, name, doc, apply_result)
 
 
 @router.get("/managed/{name}", response_model=ManagedToolOut)
@@ -1344,8 +1394,8 @@ async def replace_managed_tool(name: str, body: ManagedToolWrite):
         raise HTTPException(status_code=500, detail=f"Config '{target_block}' block is not a mapping")
     section[name] = doc
 
-    _persist_cfg(cfg)
-    return _to_out(target_block, name, doc)
+    apply_result = await _persist_cfg(cfg)
+    return _to_out(target_block, name, doc, apply_result)
 
 
 @router.patch("/managed/{name}", response_model=ManagedToolOut)
@@ -1392,11 +1442,11 @@ async def patch_managed_tool(name: str, body: ManagedToolPatch):
         raise HTTPException(status_code=500, detail=f"Config '{target_block}' block is not a mapping")
     section[name] = merged
 
-    _persist_cfg(cfg)
-    return _to_out(target_block, name, merged)
+    apply_result = await _persist_cfg(cfg)
+    return _to_out(target_block, name, merged, apply_result)
 
 
-@router.delete("/managed/{name}", status_code=204)
+@router.delete("/managed/{name}", response_model=ManagedToolDeleteOut)
 async def delete_managed_tool(name: str):
     """Delete a managed HTTP tool from the config."""
     cfg = _load_cfg()
@@ -1404,8 +1454,8 @@ async def delete_managed_tool(name: str):
     if block is None:
         raise HTTPException(status_code=404, detail=f"Tool '{name}' not found")
     _remove_tool_everywhere(cfg, name)
-    _persist_cfg(cfg)
-    return None
+    apply_result = await _persist_cfg(cfg)
+    return ManagedToolDeleteOut(name=name, **_apply_metadata(apply_result))
 
 
 # ============================================================================
@@ -1543,7 +1593,7 @@ async def patch_builtin_tool(name: str, body: Dict[str, Any]):
         raise HTTPException(status_code=500, detail="Config 'tools' block is not a mapping")
     current = tools.get(name)
     tools[name] = _deep_merge(current if isinstance(current, dict) else {}, body)
-    _persist_cfg(cfg)
+    await _persist_cfg(cfg)
     return _builtin_to_out(name, cfg)
 
 
@@ -1558,7 +1608,7 @@ async def replace_builtin_tool(name: str, body: Dict[str, Any]):
     if not isinstance(tools, dict):
         raise HTTPException(status_code=500, detail="Config 'tools' block is not a mapping")
     tools[name] = dict(body)
-    _persist_cfg(cfg)
+    await _persist_cfg(cfg)
     return _builtin_to_out(name, cfg)
 
 
@@ -1637,7 +1687,7 @@ async def patch_tools_settings(body: Dict[str, Any]):
                 raise HTTPException(status_code=422, detail=f"'{k}' looks like a managed tool (has 'kind'); use POST/PUT /api/tools/managed/{k}")
         cfg["tools"] = _deep_merge(tools, patch)
 
-    _persist_cfg(cfg)
+    await _persist_cfg(cfg)
     delay = cfg.get(_FAREWELL_DELAY_KEY)
     return ToolsSettingsOut(
         farewell_hangup_delay_sec=delay if isinstance(delay, (int, float)) else None,
