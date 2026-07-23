@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.5.1] - 2026-07-23
+
 ### Fixed
 
 - **Admin UI environment apply is recoverable** ([#552](https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/issues/552)): updater-image preparation now finishes before a running service is touched, and runtime data, secrets, and updater state are excluded from Docker build contexts. Compose replacements retain a rollback image and the previous container environment; a failed or unhealthy replacement restores the prior service when possible and returns its exact recovery state to the UI instead of leaving `ai_engine` absent.
@@ -2251,7 +2253,9 @@ Version 4.1 introduces **unified tool calling architecture** enabling AI agents 
 - **v4.0.0** (2025-10-29) - Modular pipeline architecture, production monitoring, golden baselines
 - **v3.0.0** (2025-09-16) - Modular pipeline architecture, file based playback
 
-[Unreleased]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.4.1...HEAD
+[Unreleased]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.5.1...HEAD
+[7.5.1]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.5.0...v7.5.1
+[7.5.0]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.4.1...v7.5.0
 [7.4.1]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.4.0...v7.4.1
 [7.4.0]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.3.5...v7.4.0
 [7.3.5]: https://github.com/hkjarral/AVA-AI-Voice-Agent-for-Asterisk/compare/v7.3.4...v7.3.5

@@ -18,6 +18,14 @@ Active and upcoming work. Pick something up and [get involved](#how-to-contribut
 
 Outbound dialer shipped as Alpha in v5.0.0 — core scheduling, AMD, voicemail drop, consent gate, and Admin UI are working. Current focus: DNC, retry automation, outcome classification, and resilience hardening (see Phases 6-8 in spec).
 
+### v7.5.1 — Apply Safety and Transcript Integrity (Shipped July 2026)
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| **Recoverable Admin apply** | Environment-driven Compose replacement prepares rollback state first and restores the previous service when replacement fails or remains unhealthy. | ✅ Shipped |
+| **Complete realtime transcripts** | OpenAI Realtime and Grok assistant replies remain scoped by response/item when caller-final events interleave. | ✅ Shipped |
+| **Accurate Apply vs Restart** | Tool-only changes hot reload into immutable new-call generations while provider, environment, and process changes continue to require restart. | ✅ Shipped |
+
 ### v7.5.0 — Enhanced Telephony Audio and VICIdial Remote Agents (Shipped July 2026)
 
 | Feature | Description | Status |
@@ -215,4 +223,4 @@ Longer-term goals that will shape the project's direction:
 
 ---
 
-**Last Updated**: July 2026 | **Latest Stable**: v7.5.0 | **Next**: Unreleased
+**Last Updated**: July 2026 | **Latest Stable**: v7.5.1 | **Next**: Unreleased

@@ -6,7 +6,7 @@
   <img alt="Asterisk AI Voice Agent" src="assets/banner_light_mode.png?v=9" width="100%">
 </picture>
 
-![Version](https://img.shields.io/badge/version-7.5.0-blue.svg)
+![Version](https://img.shields.io/badge/version-7.5.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![Docker](https://img.shields.io/badge/docker-compose-blue.svg)
@@ -167,7 +167,7 @@ docker compose -p asterisk-ai-voice-agent logs -f ai_engine
 ## 🎉 What's New
 
 <details open>
-<summary><b>Upcoming v7.5.1 — Safer Admin apply and complete call history</b></summary>
+<summary><b>v7.5.1 — Safer Admin apply and complete call history</b></summary>
 
 The v7.5.1 hotfix focuses on recovery and observability without changing audio
 profiles, provider transport, or fresh-install defaults.
@@ -184,6 +184,9 @@ profiles, provider transport, or fresh-install defaults.
 
 No database migration or audio-profile reassignment is required. Existing
 stored transcripts are not rewritten.
+
+See the [v7.5.1 changelog](CHANGELOG.md#751---2026-07-23) and
+[v7.5.1 upgrade notes](docs/INSTALLATION.md#upgrade-to-v751-existing-checkout).
 
 </details>
 
@@ -275,7 +278,7 @@ voicemail mailboxes it should be allowed to use.**
   working.
 
 Before upgrading—especially from v7.3.0–v7.3.3—read the
-[current upgrade procedure](docs/INSTALLATION.md#upgrade-to-v750-existing-checkout)
+[current upgrade procedure](docs/INSTALLATION.md#upgrade-to-v751-existing-checkout)
 and [Contexts → Agents migration guide](docs/OPERATOR_MIGRATION.md).
 
 </details>
